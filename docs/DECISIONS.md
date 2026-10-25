@@ -1,229 +1,239 @@
 # Architecture Decision Records (ADRs)
 
-This document records the architectural decisions, trade-offs, and design rationale for the Real-Time Operations Platform.
+This document records the critical architectural decisions, evaluated alternatives, design trade-offs, and technical rationale for the Real-Time Fleet Operations Platform.
+
+---
+
+## Index of Decisions
+
+- **ADR-001**: Monorepo Architecture with npm Workspaces
+- **ADR-002**: Ingestion Transport: HTTP REST vs MQTT vs WebSocket for Devices
+- **ADR-003**: Real-Time Transport: Server-Sent Events (SSE) vs WebSockets for Dashboard
+- **ADR-004**: Primary Database: MongoDB Atlas vs PostgreSQL
+- **ADR-005**: Asynchronous Queue Broker: BullMQ on Redis vs Apache Kafka
+- **ADR-006**: Notification Delivery: Transactional Outbox Pattern via MongoDB Transactions
+- **ADR-007**: Incident Deduplication: Partial Unique Index on Active Incidents
+- **ADR-008**: Deduplication Source of Truth: MongoDB Unique Index vs Redis Cache
+- **ADR-009**: Device Liveness Isolation: Replayed Events Not Advancing `lastSeenAt`
 
 ---
 
 ## ADR-001: Monorepo Architecture with npm Workspaces
 
 ### Context
-The platform consists of an API gateway, a background worker, a web dashboard, a CLI simulator, and shared libraries (config, logging). We needed a repository structure that avoids duplicated code while keeping development simple and reproducible.
+The platform consists of an API gateway, a background worker daemon, a React dashboard, a device simulator CLI, and shared libraries (`config`, `logger`, `database`). We required a project structure that minimizes code duplication, provides type safety across boundaries, and avoids unnecessary build tooling overhead.
 
 ### Decision
-Adopt an **npm Workspaces monorepo** (`apps/*`, `packages/*`) using native Node.js tooling.
+Adopt native **npm Workspaces** (`apps/*`, `packages/*`) using standard Node.js ECMAScript Modules (ESM).
 
-### Consequences & Trade-offs
+### Alternatives Considered
+1. **Turborepo / Nx**: Powerful caching and task pipelines, but introduces external orchestration dependencies, complex config files, and learning curves for reviewers.
+2. **Multi-Repo**: Independent repositories for API, Worker, Web, and Shared libraries. Causes high versioning friction, multiple CI pipelines, and version drift during rapid feature iteration.
+
+### Trade-offs & Rationale
 - **Pros**:
-  - Zero external monorepo dependencies (like Nx or Turborepo) needed for initial setup, keeping build pipelines lean and reliable.
-  - Shared `@fleet/config` and `@fleet/logger` packages are consumed as standard local workspace dependencies.
-  - Single `npm install` bootstraps the entire dependency tree.
+  - Zero external monorepo dependencies; standard `npm install` bootstraps everything.
+  - Native TypeScript project references provide end-to-end type safety between shared packages and consumers.
+  - Simplified CI/CD: One commit encompasses full end-to-end feature changes across API, worker, and frontend.
 - **Cons**:
-  - Docker builds require setting the build context to the root so workspaces can resolve correctly. Addressed by standardizing `context: .` in `docker-compose.yml`.
+  - Docker container builds require the build context set at repo root (`context: .`) so that workspace symlinks resolve properly. Solved cleanly in `docker-compose.yml`.
 
 ---
 
-## ADR-002: Asynchronous Event Ingestion via Redis + BullMQ
+## ADR-002: Ingestion Transport: HTTP REST vs MQTT vs WebSocket for Devices
 
 ### Context
-Telemetry events arrive at high frequencies from thousands of edge devices. Direct synchronous writes to MongoDB during peak load would lead to database lock contention, increased HTTP latency, and potential dropped packets.
+Edge IoT devices stream telemetry and periodic heartbeats. When network connectivity drops, devices buffer telemetry locally and burst-replay data upon reconnecting. We evaluated transport protocols for ingestion.
 
 ### Decision
-Decouple HTTP ingestion from business logic using **BullMQ on Redis**.
+Use **HTTP/1.1 REST** with single (`POST /v1/events`) and batch (`POST /v1/events/batch`) endpoints.
 
-### Consequences & Trade-offs
-- **Pros**:
-  - **Fast Ingestion**: The API gateway validates payloads and pushes jobs to Redis in sub-millisecond time, returning `202 Accepted` immediately.
-  - **Backpressure Protection**: Workers consume jobs at a controlled concurrency (`WORKER_CONCURRENCY`), preventing MongoDB overload.
-  - **Fault Resilience**: Failed jobs are retained in Redis and automatically retried using exponential backoff policies.
-- **Cons**:
-  - Introduces Redis as a critical dependency. Mitigated by container health checks and persistent Redis volumes.
+### Alternatives Considered
+1. **MQTT (Message Queuing Telemetry Transport)**: Extremely lightweight binary header overhead (2 bytes), persistent TCP connection, built-in QoS levels.
+2. **Raw WebSockets**: Persistent full-duplex TCP connection with low framing overhead.
+
+### Trade-offs & Rationale
+- **Why HTTP REST Won**:
+  - **Firewall & Proxy Compatibility**: Works over standard HTTP ports (80/443) through corporate firewalls, cell modems, and edge proxies without custom TCP routing.
+  - **Standard Stateless Backpressure**: Natively supports HTTP `429 Too Many Requests` with standard `Retry-After: <seconds>` headers, enabling client backoff without custom protocol handshakes.
+  - **Horizontal Scalability**: Stateless HTTP requests distribute evenly across standard Layer 7 load balancers (ALB, NGINX) without sticky sessions or stateful connection pooling.
+  - **Simple Batch Replay**: Buffered offline telemetry can be uploaded in clean 50-item batches via `/v1/events/batch`, reducing connection overhead.
+- **Trade-off**:
+  - Higher header overhead per packet compared to binary MQTT. For high-volume fleets, this is mitigated by batching replayed events and using keep-alive connections. For ultra-low bandwidth deployments (e.g. satellite/NB-IoT), an edge MQTT gateway terminating TLS and forwarding to the HTTP API is recommended (see [docs/DEPLOYMENT.md](DEPLOYMENT.md)).
 
 ---
 
-## ADR-003: Real-Time Transport: Server-Sent Events (SSE) vs WebSockets
+## ADR-003: Real-Time Transport: Server-Sent Events (SSE) vs WebSockets for Dashboard
 
 ### Context
-The React operations dashboard requires instant updates when device statuses change or incidents occur. We evaluated WebSockets vs Server-Sent Events (SSE).
+The operational mission control dashboard requires sub-second live streaming of incoming telemetry, device status transitions, and incident alerts.
 
 ### Decision
-Use **Server-Sent Events (SSE)** for the real-time event pipeline (`/api/v1/events/stream`).
+Use **Server-Sent Events (SSE)** via `GET /v1/stream`.
 
-### Consequences & Trade-offs
-- **Pros**:
-  - **Simplicity**: SSE operates over standard HTTP/1.1 and HTTP/2 without requiring custom upgrade handshakes or dual-protocol load balancer configurations.
-  - **Built-in Reconnection**: Browser `EventSource` handles connection drops, exponential reconnection, and `Last-Event-ID` tracking natively.
-  - **Unidirectional Fit**: Fleet monitoring is primarily server-to-client telemetry streaming. Control actions (e.g. resolving incidents) use standard REST POST/PATCH endpoints.
-- **Cons**:
-  - Unidirectional only (client cannot send arbitrary messages over the same stream). This is an explicit feature, not a drawback, as it cleanly separates read streams from command mutations.
+### Alternatives Considered
+1. **WebSockets (`ws://` / `wss://`)**: Full-duplex bidirectional communication channel.
+2. **HTTP Short / Long Polling**: Periodic REST requests every few seconds.
+
+### Trade-offs & Rationale
+- **Why SSE Won**:
+  - **Unidirectional Fit**: Telemetry monitoring is intrinsically server-to-client streaming. User interactions (e.g. acknowledging or resolving incidents) use standard REST mutations (`POST /v1/incidents/:id/ack`), maintaining clean CQRS separation.
+  - **Native Browser Resilience**: Browser `EventSource` automatically handles reconnection with exponential backoff and tracks the `Last-Event-ID` header, automatically requesting only missed events upon reconnect.
+  - **Standard HTTP Transport**: Operates over HTTP/1.1 and HTTP/2 without WebSocket upgrade handshakes, protocol switching issues, or corporate proxy blocking.
+  - **CORS & Proxy Simplicity**: Works seamlessly with standard reverse proxies (Vite proxy, NGINX) with `X-Accel-Buffering: no`.
+- **Trade-off**:
+  - Client cannot send messages over the stream. As noted, this is an intentional design benefit separating the write and read paths.
 
 ---
 
-## ADR-004: Dual Data Store Strategy (MongoDB + Redis)
+## ADR-004: Primary Database: MongoDB Atlas vs PostgreSQL
 
 ### Context
-The platform needs both high-throughput ephemeral caching/queueing and rich document querying for device states and historical incidents.
+The platform requires durable storage for heterogeneous telemetry payloads, device registries, alert rules, incidents, explainability evaluation records, and outbox notifications.
 
 ### Decision
-Pair **Redis 7.2** for ephemeral queues, pub/sub, and heartbeats with **MongoDB 7.0** for durable device state and incident storage.
+Use **MongoDB Atlas** (v7.0) with Mongoose.
 
-### Consequences & Trade-offs
-- **Pros**:
-  - Redis provides sub-millisecond BullMQ operations and fast TTL-based stale heartbeat tracking.
-  - MongoDB provides flexible document models for heterogeneous device telemetry, indexing on `deviceId` and `timestamp`, and historical queries.
-- **Cons**:
-  - Two database engines to maintain. Justified because their access patterns and operational requirements are orthogonal.
+### Alternatives Considered
+1. **PostgreSQL with TimescaleDB / JSONB**: Relational SQL database with time-series extensions.
+2. **Dedicated Time-Series DB (InfluxDB, Timescale) + Relational (Postgres)**: Two separate databases for metrics vs incidents.
+
+### Trade-offs & Rationale
+- **Why MongoDB Won**:
+  - **Heterogeneous Telemetry**: Devices emit varying metrics (temperature, humidity, speed, battery, diagnostic codes). MongoDB's flexible BSON document model stores dynamic schemas without rigid schema migrations.
+  - **Partial Unique Indexes**: MongoDB natively supports partial unique indexes (e.g. `{ dedupeKey: 1 }` with filter `{ state: { $in: ['open', 'acknowledged'] } }`), solving the incident deduplication race condition at the storage engine level.
+  - **Embedded Incident Timelines**: Incident audit logs (triggering events, acknowledgment, resolution) are embedded directly within the incident document as capped arrays (`$slice: -20`), eliminating multi-table relational joins.
+  - **TTL Indexes for Storage Hygiene**: High-frequency evaluation logs in `rule_evaluations` are automatically purged after 24 hours via MongoDB's native background TTL index (`{ expireAfterSeconds: 86400 }`).
+- **Trade-off**:
+  - Less optimal for complex relational joins across multiple entities. However, the operational domain is document-centric and read-optimized for individual devices and incidents.
 
 ---
 
-## ADR-005: Unified Pino Structured JSON Logging & Distributed Tracing
+## ADR-005: Asynchronous Queue Broker: BullMQ on Redis vs Apache Kafka
 
 ### Context
-Debugging fleet operations requires tracing telemetry packets from ingestion through queueing, rule execution, and UI broadcast. Plain text logs (`console.log`) lack machine parseability and trace correlation.
+High-frequency telemetry ingestion must be decoupled from heavy rule evaluations, database writes, and notification dispatches to prevent database contention and guarantee low HTTP latency.
 
 ### Decision
-Implement a shared `@fleet/logger` module utilizing **Pino** and Node.js **`AsyncLocalStorage`**.
+Use **BullMQ on Redis** for internal message queueing.
 
-### Consequences & Trade-offs
-- **Pros**:
-  - High performance: Pino is known for extremely low overhead in Node.js event loops.
-  - Distributed Correlation: Each incoming request carries or generates an `x-correlation-id` header.
-  - `AsyncLocalStorage` makes the correlation ID accessible across asynchronous execution stacks without polluting function signatures.
-  - Standard JSON output in production enables automated ingestion into systems like Datadog, ELK, or CloudWatch.
-- **Cons**:
-  - In local development, JSON logs can be hard to read without pretty-printing; addressed by integrating `pino-pretty` for non-production environments.
+### Alternatives Considered
+1. **Apache Kafka**: High-throughput distributed partition log.
+2. **RabbitMQ**: AMQP message broker with exchange routing.
+3. **AWS SQS**: Managed cloud message queue.
+
+### Trade-offs & Rationale
+- **Why BullMQ on Redis Won**:
+  - **Operational Simplicity**: Single Redis cluster serves as the message broker, pub/sub fanout engine, fast-path dedupe cache, and capped live stream buffer (`XADD MAXLEN ~ 500`). Zero JVM, Zookeeper, or KRaft operational overhead.
+  - **Sub-Millisecond Ingestion**: Pushing a job to BullMQ takes under 1ms, allowing the API to return HTTP 202 immediately.
+  - **Built-in Job Deduplication**: BullMQ supports explicit `jobId: eventId`, preventing duplicate queue jobs.
+  - **Built-in Delayed / Repeatable Jobs**: Powers the 5-second recurring stale device scanner and exponential backoff retry policies natively.
+- **Trade-off**:
+  - Redis is memory-bound compared to Kafka's disk-based retention. We enforce strict retention limits (`removeOnComplete: 100`, `removeOnFail: 500`) and use Redis streams capped at 500 entries (`XADD MAXLEN ~ 500`), keeping memory footprint under 30 MB.
 
 ---
 
-## ADR-006: Health Check & Container Lifecycle Strategy
+## ADR-006: Notification Delivery: Transactional Outbox Pattern via MongoDB Transactions
 
 ### Context
-Docker Compose and orchestrators (Kubernetes/ECS) require robust readiness and liveness checks to ensure dependent services only start when dependencies are healthy.
+When a rule triggers an incident, a notification must be dispatched to an external operator webhook. If the worker crashes immediately after creating the incident but before sending the notification, the notification is permanently lost (dual-write problem).
 
 ### Decision
-Equip all services with standardized `/healthz` endpoints and configure `service_healthy` dependencies in `docker-compose.yml`.
+Implement the **Transactional Outbox Pattern** using MongoDB multi-document transactions (`session.withTransaction`).
 
-### Consequences & Trade-offs
-- **Pros**:
-  - API, Worker, and Web services all expose `/healthz` returning standard JSON metadata (status, uptime, timestamp).
-  - Background worker hosts a lightweight HTTP probe server so container orchestrators can check worker liveness without executing heavy CLI commands inside the container.
-  - Docker Compose starts services in strict topological order (`mongo`/`redis` healthy -> `api`/`worker` healthy -> `web` healthy).
+### Alternatives Considered
+1. **Direct Synchronous Webhook Call**: Worker sends HTTP request directly during rule evaluation.
+   *Problem*: Webhook latency delays event processing; webhook failures cause rule evaluation failures; crashes lose notifications.
+2. **Non-Transactional Two-Step Write**: Create incident in collection 1, then create notification in collection 2.
+   *Problem*: A crash between step 1 and step 2 creates an orphaned incident with zero notification.
+
+### Trade-offs & Rationale
+- **How It Works**:
+  1. `recordIncidentMatch()` opens a MongoDB session and executes `session.withTransaction()`.
+  2. The `Incident` and the `Notification` outbox record are committed atomically: **both exist or neither does**.
+  3. A background dispatcher polls pending outbox records and claims them using an atomic lease lock (`lockedUntil`).
+  4. If a worker crashes during dispatch, the lease expires and a peer worker reclaims it.
+  5. An **Outbox Repair Sweeper** periodically scans for open incidents lacking notification records and recreates them idempotently.
+- **Trade-off**:
+  - Multi-document transactions in MongoDB require a replica set (Atlas provides this by default). Adds minor transactional write overhead (~20ms), well worth the absolute delivery guarantee.
 
 ---
 
-## ADR-007: Centralized `@fleet/database` Package for Shared Data Models & Indexes
+## ADR-007: Incident Deduplication: Partial Unique Index on Active Incidents
 
 ### Context
-Both `apps/api` (HTTP ingestion, device registration, explainability REST queries) and `apps/worker` (BullMQ telemetry consumers, rules engine, sweeper, stale device detector) interact with MongoDB collections (`devices`, `events`, `rejected_events`, `rules`, `incidents`, `rule_evaluations`). Maintaining duplicate Mongoose models and schema definitions across separate applications led to duplicate index creation warnings, inconsistent TypeScript type definitions, and synchronization bugs across workspaces.
+When a device exceeds an operational threshold 100 times in 10 seconds, or 20 concurrent threads process simultaneous events for the same device and rule, the system must produce **exactly one incident** with `occurrenceCount: 100`, rather than spamming 100 separate alerts.
 
 ### Decision
-Extract all Mongoose schemas, TypeScript interfaces, unique index initialization, and connection lifecycle management into a dedicated workspace package: `@fleet/database`.
+Enforce deduplication at the database level using a **MongoDB Partial Unique Index**:
+```javascript
+db.incidents.createIndex(
+  { dedupeKey: 1 },
+  { unique: true, partialFilterExpression: { state: { $in: ['open', 'acknowledged'] } } }
+);
+```
 
-Both `apps/api` and `apps/worker` consume `@fleet/database` as an internal workspace dependency (`packages/database`).
+### Alternatives Considered
+1. **Application-Level Check-Then-Act (`findOne`, then `create`)**:
+   *Problem*: Race condition. Two concurrent threads find no existing incident and both insert, resulting in duplicate open incidents.
+2. **Distributed Redis Mutex (`Redlock`)**:
+   *Problem*: Adds network round trips, lock timeout tuning, and complexity during worker failover.
 
-### Consequences & Trade-offs
-- **Pros**:
-  - **Single Source of Truth**: All schema changes, validations, and index definitions (such as the unique index on `events.eventId`) are defined in one place and instantly available to all services.
-  - **Eliminates Connection & Index Duplication**: Startup routines initialize indexes deterministically once.
-  - **Shared Domain Utilities**: Helper functions like `calculateDeviceStatus()` and common type definitions (`DeviceStatus`, `RuleSeverity`, `ThresholdConditions`) are shared without code duplication.
-- **Cons & Trade-offs**:
-  - Tighter schema coupling between the API service and the worker service. While microservice purists sometimes advocate for independent data access layers per service, in this real-time fleet operations platform, both services operate on the same MongoDB database and rely on shared transactional guarantees (e.g. `events` collection being the source of truth for deduplication and idempotency). A shared typed package provides compile-time type safety and guarantees schema parity across consumers.
+### Trade-offs & Rationale
+- **How It Works**:
+  - `dedupeKey` is composed of `${ruleId}:${deviceId}`.
+  - While an incident is `open` or `acknowledged`, no second incident can be inserted with the same key.
+  - The worker first attempts an atomic `findOneAndUpdate({ dedupeKey, state: { $in: ['open', 'acknowledged'] } }, { $inc: { occurrenceCount: 1 }, ... })`.
+  - If no incident exists, it attempts creation within the transaction. If a concurrent race occurs, the unique index rejects the second insert with `E11000`, and the worker catches it and atomically increments the winner's occurrence count.
+  - Once an incident transitions to `resolved`, it drops out of the partial index filter, allowing future threshold breaches to cleanly open a fresh incident.
+- **Trade-off**:
+  - Requires MongoDB partial index support. Fully supported in all modern MongoDB versions.
 
 ---
 
-## ADR-008: Incident Deduplication with Partial Unique Indexes & Transactional Outbox Notifications
+## ADR-008: Deduplication Source of Truth: MongoDB Unique Index vs Redis Cache
 
 ### Context
-In high-throughput IoT fleet operations, hundreds of over-threshold telemetry events can be received simultaneously across distributed worker instances. Previous check-then-insert incident suppression suffered from race conditions under concurrency, creating duplicate open incidents for the same device and rule. Furthermore, dispatching notifications synchronously during incident creation couples business logic to external webhook availability and causes duplicated or lost alerts during worker crashes.
+Duplicate telemetry packets occur frequently due to cellular retries, network retransmissions, or client reconnects. We needed a deduplication architecture that is both fast and 100% durable.
 
 ### Decision
-1. **Partial Unique Index Deduplication**:
-   - Enforce at most ONE non-resolved incident per `dedupeKey` (`${ruleId}:${deviceId}`) using a MongoDB partial unique index:
-     `{ dedupeKey: 1 }, { unique: true, partialFilterExpression: { state: { $in: ['open', 'acknowledged'] } } }`
-   - Replaced check-then-insert with an atomic `findOneAndUpdate` upsert. Repeated event matches increment `occurrenceCount`, update `lastEventId`, and append references to `triggeringEvents` (capped at 20).
-   - Concurrent `E11000` races are caught and retried immediately against the newly inserted document.
-2. **Strict Incident State Machine**:
-   - Only allow valid forward transitions: `open -> acknowledged`, `open -> resolved`, `acknowledged -> resolved`. Any other transition (or mutating a resolved incident) strictly returns `409 Conflict`.
-   - Stale incidents auto-resolve only when fresh, non-replayed events arrive from the device, with an explanatory audit timeline entry. Replayed events never auto-resolve stale incidents.
-3. **Transactional Outbox for Notifications**:
-   - Persist a `notifications` outbox record atomically upon incident creation with status `pending`. Notification failures never block or roll back incident creation.
-   - Dedicated worker dispatcher polls pending outbox records, claiming them atomically with a lease timeout (`status: 'sending'`, `lockedUntil`) to ensure concurrent workers never dispatch the same notification twice, and automatically reclaims expired leases after worker crashes.
-   - Idempotent delivery to webhooks with `Idempotency-Key` headers, exponential backoff with jitter, and dead-lettering (`status: 'dead'`) after `MAX_NOTIFY_ATTEMPTS`.
-4. **Storage Hygiene**:
-   - Applied a 24-hour TTL index on `rule_evaluations` (`expireAfterSeconds: 86400`) to respect database storage limits.
-   - Suppressed periodic stale detector evaluations when an incident is already open, incrementing `suppressedStaleChecksCount` on the incident document instead of writing redundant evaluation records.
+Designate **MongoDB's unique index on `events.eventId` as the authoritative source of truth**, with Redis as a non-authoritative fast-path cache.
 
-### Consequences & Trade-offs
-- **Pros**:
-  - Absolute concurrency safety: Partial unique index guarantee holds across multiple distributed worker processes.
-  - Zero duplicate notification dispatches with atomic lease claiming.
-  - Resilience against third-party webhook outages via transactional outbox retry loops.
-  - Controlled storage footprint on MongoDB Atlas free tier.
-- **Cons**:
-  - Partial indexes require MongoDB query patterns to explicitly match the filter expression (`state in ['open', 'acknowledged']`) to leverage the unique constraint.
+### Alternatives Considered
+1. **Redis-Only Deduplication (`SET NX` or Redis Bloom Filter)**:
+   *Problem*: If Redis restarts, experiences an outage, or evicts keys under memory pressure (`volatile-lru`), historical deduplication memory is lost, allowing duplicate packets to be accepted and re-executed.
+
+### Trade-offs & Rationale
+- **How It Works**:
+  1. The API attempts `Event.create({ eventId, ... })` directly in MongoDB.
+  2. If the event already exists, MongoDB immediately throws duplicate key error `E11000`.
+  3. The API catches `E11000` and returns HTTP 200 `status: "duplicate"`.
+  4. Redis caching (`event_seen:<eventId>`) occurs **only after** successful MongoDB persistence.
+  5. Verified by acceptance test 8b: even when the Redis cache key is explicitly deleted via `DEL`, subsequent duplicate submissions still return `duplicate` via MongoDB.
+- **Trade-off**:
+  - MongoDB insert round-trip is required for the first write (~10-20ms). This ensures zero duplicate events ever enter the queue or rule engine under any failure scenario.
 
 ---
 
-## ADR-009: Realtime Server-Sent Events (SSE), Redis Stream Bounded Backlog, Multi-Instance Fan-Out, and Dashboard Status APIs
+## ADR-009: Device Liveness Isolation: Replayed Events Not Advancing `lastSeenAt`
 
 ### Context
-Operational monitoring of large device fleets requires real-time push updates for incoming telemetry, incident creation/lifecycle changes, and device health transitions. WebSockets introduce bidirectional complexity and stateful connection overhead; Server-Sent Events (SSE) offer a lightweight, standard HTTP push protocol supported natively by browsers. However, production fleet monitoring faces several constraints:
-1. Native browser `EventSource` cannot send custom headers such as `x-api-key`.
-2. Temporary client disconnections must recover missed messages without data loss.
-3. Redis memory is tightly bounded (30 MB limit on free-tier Redis), necessitating strict log capping.
-4. Telemetry bursts (e.g., 500 events/second) can saturate browser clients if high-frequency ingest events are not rate-limited, but critical incident and device status alerts must NEVER be dropped.
-5. Multiple API instances must fan out messages published by background workers to all connected clients.
+When a device disconnects for 20 minutes and subsequently dumps hundreds of buffered readings upon reconnecting, the system must evaluate operational rules against the historical data (e.g. detect a motor overheating while offline), but must **not** falsely treat the historical timestamps as live heartbeats.
 
 ### Decision
-1. **Server-Sent Events (`GET /v1/stream`)**:
-   - Pushes four core real-time event types: `event_ingested`, `incident_created`, `incident_updated`, and `device_status_changed`.
-   - Each message carries a monotonically incrementing numeric ID (`id: <number>`).
-   - Supports the standard `Last-Event-ID` request header for seamless reconnection.
-   - Sets standard SSE headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache, no-transform`, `Connection: keep-alive`, and `X-Accel-Buffering: no` (disabling proxy buffering).
-   - Emits an SSE comment heartbeat every 15 seconds (`: heartbeat\n\n`) to prevent intermediate proxy timeouts.
-   - Cleans up client listeners on socket disconnect to guarantee zero memory or subscriber leaks.
+Flag replayed events with `replayed: true` (or detect `receivedAt - timestamp > 5 minutes`), and **isolate replayed telemetry from device liveness tracking**.
 
-2. **Bounded Redis Stream Log & Replay**:
-   - Uses a Redis Stream (`fleet:stream:events`) capped via `XADD MAXLEN ~ 500` (configurable via `sseMaxLen` in `@fleet/config`).
-   - Entries are indexed as `${seq}-0` where `seq` is generated atomically via `INCR fleet:stream:id_seq`.
-   - On reconnect with `Last-Event-ID`, the server queries `XRANGE (${lastId}-0 +` to stream only missed messages.
-   - If the requested `Last-Event-ID` is older than the oldest retained stream entry (log truncated), the server immediately emits a `resync_required` event payload, prompting the client to refetch full snapshot state.
+### Alternatives Considered
+1. **Treat All Received Telemetry Equally**: Update device `lastSeenAt` to `new Date()` or event `timestamp` on every event.
+   *Problem*: If a device was offline for an hour and reconnects, replaying old events with historical timestamps would cause device status to bounce incorrectly or falsely mask active stale alerts.
 
-3. **Shared Publisher Helper & Multi-Instance Fan-Out**:
-   - Centralized `publishRealtimeEvent()` in `@fleet/config` used by both API routes and background workers:
-     - **Atomic Lua Script**: Executes `INCR`, capped `XADD`, and `PUBLISH` within a single atomic Lua script (`EVAL`) in Redis. This completely eliminates race conditions where concurrent calls between API and worker processes could interleave between `INCR` and `XADD` and trigger Redis `ERR The ID specified in XADD is equal or smaller than the target stream top item` rejections.
-     - Monotonically incrementing ID sequence (`${seq}-0`).
-     - Capped `XADD` to `fleet:stream:events` (`MAXLEN ~ 500`).
-     - Redis Pub/Sub broadcast on `fleet:pubsub:sse`.
-     - Bounded recent activity push via `LPUSH` / `LTRIM 0 99` to `fleet:activity:recent`.
-   - Every API instance subscribes to `fleet:pubsub:sse` on startup, broadcasting incoming pub/sub messages to its locally connected SSE clients. This decouples worker processing from specific API web nodes.
-
-4. **Stream Throttling & Coalescing**:
-   - High-rate `event_ingested` messages are coalesced to at most 10 per second per client using a 1-second sliding bucket window. Excess ingested messages in a window are dropped or replaced with latest state.
-   - Critical messages (`incident_created`, `incident_updated`, `device_status_changed`, `resync_required`) are ALWAYS delivered immediately, bypassing rate limiters to guarantee zero dropped alerts under load.
-
-5. **Dashboard Token Authentication & Status Endpoints**:
-   - Because native `EventSource` cannot transmit custom headers, `/v1/stream` and dashboard read endpoints do not require `x-api-key`.
-   - Implemented `dashboardAuth` middleware accepting an optional `DASHBOARD_TOKEN` environment variable passed via `?token=` query parameter or `Authorization: Bearer <token>` (off by default for seamless local development).
-   - *Note on Production Deployments*: Production environments would integrate proper operator authentication (e.g., HTTP-only session cookies, OAuth2, or JWT tokens).
-   - Supporting status endpoints:
-     - `GET /v1/devices`: Lists devices with dynamically computed status (`online`, `stale`, `offline`), `location`, `lastSeenAt`, `lastSeq`, and event counts, with status filtering.
-     - `GET /v1/devices/:id/events`: Paginated recent events for a specific device.
-     - `GET /v1/events`: Paginated recent telemetry events, filterable by `type` and `deviceId`.
-     - `GET /v1/stats`: Operational dashboard metrics (events per minute, devices by status, incidents by severity, BullMQ queue depth, failed jobs, Redis duplicate/rejection counters, outbox notifications, active SSE clients).
-     - `GET /v1/activity`: Recent activity feed combining real-time memory buffer and database audit history.
-
-6. **Connection Pool Hygiene**:
-   - Implemented client connection pooling in `@fleet/config`: standard Redis operations (caching, deduplication, stats, publishing) share a single singleton Redis client per Node.js process (`getSharedRedisClient()`), while blocking consumers (BullMQ workers and SSE pub/sub subscribers) utilize dedicated clients (`createDedicatedRedisClient()`). This keeps total Redis connections safely within cloud provider limits (e.g. Upstash 20-connection cap).
-
-### Consequences & Trade-offs
-- **Pros**:
-  - Full real-time dashboard responsiveness with zero WebSocket protocol overhead.
-  - Fault-tolerant reconnects: network glitches seamlessly replay missed events from Redis Stream.
-  - Safe memory bounds on free-tier Redis instances via `MAXLEN ~ 500`.
-  - Zero dropped alerts for critical incidents during high-rate telemetry floods.
-  - Multi-instance API readiness via Redis Pub/Sub broadcast.
-- **Cons**:
-  - SSE is unidirectional (server-to-client); dashboard actions (acknowledging, resolving incidents) still require standard HTTP REST POST requests.
-
-
-
+### Trade-offs & Rationale
+- **How It Works**:
+  - When `isReplay === true`:
+    - The event is evaluated against all threshold rules (incidents created are flagged `fromReplay: true`).
+    - Device `lastSeenAt` is **not advanced**.
+    - Device `status` is **not set to online**.
+    - Open `stale` incidents are **not auto-resolved**.
+  - Device liveness updates and stale incident auto-resolution occur **only** when fresh, non-replayed live telemetry arrives.
+- **Trade-off**:
+  - Requires devices to accurately set the `replayed` flag or server to use a 5-minute threshold. Both mechanisms are implemented in the API for layered safety.

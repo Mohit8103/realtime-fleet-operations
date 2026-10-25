@@ -1,170 +1,202 @@
 # Real-Time Fleet Operations Platform
 
 [![Node.js Version](https://img.shields.io/badge/Node.js-%3E%3D20.0.0-green.svg)](https://nodejs.org/)
-[![Docker Compose](https://img.shields.io/badge/Docker-Compose%20v2-blue.svg)](https://docs.docker.com/compose/)
-[![Architecture](https://img.shields.io/badge/Docs-Architecture%20%26%20ADRs-blueviolet.svg)](docs/ARCHITECTURE.md)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Architecture](https://img.shields.io/badge/Docs-Architecture-blueviolet.svg)](docs/ARCHITECTURE.md)
+[![Test Report](https://img.shields.io/badge/Docs-Test%20Report-success.svg)](docs/TEST_REPORT.md)
 
-An event-driven **Real-Time Operations Platform** for device fleet telemetry monitoring, rules evaluation, incident orchestration, and live operations dashboarding.
+An enterprise-grade, event-driven **Real-Time Operations Platform** for device fleet telemetry monitoring, rules evaluation, incident orchestration, and live operations dashboarding.
 
-Built with a focus on **reliability, predictable latency, fault-tolerance, and deep observability**.
-
----
-
-## 🛠️ Stack & Technologies
-
-- **Runtime & Language**: Node.js 22 / 24, TypeScript (ESM)
-- **Monorepo**: npm Workspaces (`apps/*`, `packages/*`)
-- **API Service**: Express 5, Helmet, CORS, Server-Sent Events (SSE)
-- **Background Worker**: BullMQ, Redis 7.2, Stale Device Scheduler
-- **Frontend Dashboard**: React 18, Vite 6, JetBrains Mono & Inter typography
-- **Database & Cache**: MongoDB 7.0, Redis 7.2
-- **Simulator**: Node CLI tool (`apps/simulator`)
-- **Logging & Tracing**: Pino JSON logger with `x-correlation-id` and `AsyncLocalStorage` tracing
-- **Orchestration**: Docker Compose with container health checks and dependencies
-- **Testing**: Vitest, Supertest
+Built with a focus on **operational reliability, predictable latency, fault-tolerance, and deep observability**.
 
 ---
 
-## 📁 Repository Structure
+## 📋 Prerequisites
 
-```text
-├── apps/
-│   ├── api/             # HTTP ingestion, REST endpoints, SSE live stream (:3000)
-│   ├── worker/          # BullMQ consumers, stale scheduler, incident dispatcher (:3001)
-│   ├── web/             # React + Vite operations dashboard (:5173)
-│   └── simulator/       # Device fleet telemetry simulator CLI
-├── packages/
-│   ├── config/          # Centralized Zod-validated environment config (@fleet/config)
-│   └── logger/          # Structured Pino JSON logger with Correlation IDs (@fleet/logger)
-├── docs/
-│   ├── ARCHITECTURE.md  # System architecture, event pipelines, and guarantees
-│   ├── DECISIONS.md     # Architecture Decision Records (ADRs)
-│   └── DEPLOYMENT.md    # Deployment runbook, health checks, and local dev
-├── docker-compose.yml   # Multi-container orchestration (Mongo, Redis, API, Worker, Web)
-└── vitest.config.ts     # Root test runner configuration
-```
+- **Node.js**: Version `20.0.0` or higher (tested on Node 20, 22, and 24).
+- **npm**: Version `10.0.0` or higher.
+- **MongoDB**: A free [MongoDB Atlas](https://www.mongodb.com/cloud/atlas) M0 cluster (or local MongoDB 7.0).
+- **Redis**: A free [Upstash Redis](https://upstash.com/) or [Redis Cloud](https://redis.io/cloud/) database (or local Redis 7.2).
+- *(Optional)* **Docker & Docker Compose**: Docker is secondary and optional; all services can run locally via native Node.js.
+
+> [!CAUTION]
+> **Security Notice**: Never commit real database connection strings or credentials to source control. Always store credentials in a local `.env` file, which is ignored by git.
 
 ---
 
-## 🚀 Quick Start (Docker Compose)
+## ⚙️ Setup & Installation
 
-Start all services with a single command:
-
+### 1. Clone & Install Dependencies
 ```bash
-docker compose up --build
-```
+# Clone repository
+git clone https://github.com/Mohit8103/assesment.git
+cd assesment
 
-All 5 core services will start in dependency order:
-1. `fleet_mongo` (`:27017`) - MongoDB 7.0
-2. `fleet_redis` (`:6379`) - Redis 7.2
-3. `fleet_api` (`:3000`) - Express Ingestion & REST API
-4. `fleet_worker` (`:3001`) - BullMQ Background Worker
-5. `fleet_web` (`:5173`) - React Vite Dashboard
-
----
-
-## 🩺 Service Health Verification
-
-Each service includes a standardized `/healthz` endpoint:
-
-| Service | Port | Endpoint | Health Probe Command |
-| :--- | :--- | :--- | :--- |
-| **API Gateway** | `3000` | `/healthz` | `curl http://localhost:3000/healthz` |
-| **Worker Engine** | `3001` | `/healthz` | `curl http://localhost:3001/healthz` |
-| **Web Dashboard** | `5173` | `/healthz` | `curl http://localhost:5173/healthz` |
-| **Mission Control UI** | `5173` | `/` | Open in browser: `http://localhost:5173` |
-
-### Sample API `/healthz` Response:
-```json
-{
-  "status": "ok",
-  "service": "api",
-  "uptime": 5.12,
-  "timestamp": "2026-10-25T02:00:00.000Z",
-  "environment": "development",
-  "correlationId": "4a71b262-e64e-4f70-bfe5-1cb6b38cbbde"
-}
-```
-
----
-
-## 💻 Local Development (Without Docker)
-
-You can run databases in Docker and Node services natively on your machine:
-
-```bash
-# 1. Start MongoDB and Redis containers
-docker compose up -d mongo redis
-
-# 2. Install workspace dependencies
+# Install workspace dependencies
 npm install
+```
 
-# 3. Run individual services in parallel terminals
-npm run dev:api         # Starts API on http://localhost:3000
-npm run dev:worker      # Starts Worker on http://localhost:3001
-npm run dev:web         # Starts Web on http://localhost:5173
+### 2. Configure Environment Variables
+Copy the template environment file:
+```bash
+cp .env.example .env
+```
 
-# 4. Run simulator CLI
-npm run dev:simulator -- --devices 10 --interval 1000
+Edit `.env` and configure your cloud database endpoints:
+```env
+# MongoDB Atlas Connection URI
+MONGO_URL=mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/fleet_ops?retryWrites=true&w=majority
+
+# Upstash Redis / Redis Cloud Connection URI (with TLS)
+REDIS_URL=rediss://default:<password>@<endpoint>.upstash.io:6379
+
+# Service Ports & Host Bindings
+NODE_ENV=development
+API_PORT=3000
+WORKER_HEALTH_PORT=3001
+WEB_PORT=5173
+CORS_ORIGIN=http://localhost:5173
+```
+
+### 3. Seed Database
+Initialize default operational rules and primary operators:
+```bash
+npm run seed
+```
+
+### 4. Start Local Development Stack
+Start the API gateway, background worker, and React dashboard concurrently:
+```bash
+npm run dev
+```
+
+Alternatively, run each service in separate terminals for dedicated logs:
+```bash
+npm run dev:api         # Terminal 1: API Gateway on http://localhost:3000
+npm run dev:worker      # Terminal 2: Worker Daemon on http://localhost:3001
+npm run dev:web         # Terminal 3: React Dashboard on http://localhost:5173
 ```
 
 ---
 
-## ☁️ Connecting to Cloud Databases (MongoDB Atlas & Upstash Redis)
+## 🖥️ Operations Mission Control Dashboard
 
-If you do not have Docker installed or prefer managed cloud services, the platform natively reads `MONGO_URL` and `REDIS_URL` from your `.env` via `@fleet/config`.
-
-### 1. MongoDB Atlas Configuration
-Create a MongoDB Atlas cluster, retrieve your connection URI, and set `MONGO_URL` in `.env`:
-
-```env
-MONGO_URL=mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/fleet_ops?retryWrites=true&w=majority
+Open your web browser and navigate to:
+```text
+http://localhost:5173
 ```
-- `@fleet/config` automatically resolves `MONGO_URL` (with backward compatibility for `MONGO_URI`).
-- No local MongoDB daemon or container is required.
 
-### 2. Upstash Redis Configuration
-Create a serverless Redis database on [Upstash](https://upstash.com/), copy the standard Redis TLS URI (`rediss://...`), and set `REDIS_URL` in `.env`:
+The mission-control UI features:
+- **Connection Status Banner**: Visible live indicator (`connected`, `reconnecting`, `offline`).
+- **Overview Tab**: Live stat cards (`devices online/stale/offline`, `open incidents by severity`, `events/min`, `queue depth`, `failed notifications`) and recent activity audit log.
+- **Devices Tab**: Real-time fleet registry with status badges, location, last seen timestamp, and last sequence number. Click any device to inspect its recent events.
+- **Live Events Tab**: Realtime Server-Sent Events (SSE) feed capped at 200 rows with pause/resume controls and type/device filtering.
+- **Incidents Tab**: Filterable incident management interface with state badges, triggering events, explainability audit reasons, and optimistic `Acknowledge` and `Resolve` actions.
 
-```env
-REDIS_URL=rediss://default:<password>@<endpoint>.upstash.io:6379
-```
-- `@fleet/config` detects `REDIS_URL` and flags TLS encryption (`isTls: true`) for `rediss://` protocols.
-- Setting `REDIS_URL` automatically takes precedence over `REDIS_HOST` and `REDIS_PORT`.
-- BullMQ and ioredis connect directly through the encrypted TLS tunnel.
+---
 
-### 3. Start Services with Cloud Datastores
-With `.env` populated, start the services without Docker:
+## 🎮 Running Demos & Simulator Scenarios
+
+The platform includes an automated device simulator (`apps/simulator`) with realistic network scenarios:
 
 ```bash
-npm run dev:api        # Terminal 1
-npm run dev:worker     # Terminal 2
-npm run dev:web        # Terminal 3
+# 1. Normal Steady Telemetry (3 devices, 1 event/sec)
+npm run demo:normal
+
+# 2. Offline Disconnection & Burst Replay (3 devices, offline after 20s for 90s)
+npm run demo:offline
+
+# 3. Burst Stress Test (1 device, 300 events fired instantly)
+npm run demo:burst
+
+# 4. Chaos Scenario (5 devices with duplicates, out-of-order, malformations, and anomalies)
+npm run demo:chaos
 ```
+
+### What to Watch For in the Offline Demo (`npm run demo:offline`)
+1. **0s – 20s (Live Sending)**: All 3 devices stream regular readings and heartbeats. Dashboard shows devices as `online` with events updating smoothly.
+2. **20s – 110s (Offline Window)**:
+   - Devices stop transmitting over HTTP and buffer events in local memory and disk (`.simulator-buffer.json`).
+   - The simulator console shows `state: offline` and `buffered` climbing.
+   - After ~60 seconds of inactivity, the worker's stale detector triggers and flags devices as `stale`, opening `Manual Stale` incidents on the dashboard.
+3. **110s+ (Replay & Recovery)**:
+   - Simulator reconnects and displays `state: replaying`.
+   - Buffered events are drained in sequential batches of 50 via `POST /v1/events/batch` with `replayed: true`.
+   - Replayed events preserve their original historical generation timestamps and do **not** falsely mark devices online.
+   - Once the buffer decrements to `0`, live sending resumes (`state: online`), fresh events update `lastSeenAt`, and the open stale incidents **auto-resolve automatically** (`resolvedBy: "system:auto-resolve"`).
 
 ---
 
-## 🧪 Running Tests
+## 🧪 Running Tests & Test Data Cleanup
 
-Execute unit and integration tests across the workspace:
+The platform features a consolidated end-to-end failure scenario test suite:
 
 ```bash
 npm test
 ```
 
+> [!IMPORTANT]
+> **Prerequisites for Running Tests**:
+> - `npm test` runs against an **already-running local stack** (`api` on `:3000`, `worker` on `:3001`, and both MongoDB and Redis reachable).
+> - The consolidated test run takes **roughly 5 minutes** (`~258 seconds`) because it exercises real-world timeouts, rate limits, 500-event bursts, concurrency stress tests, and SSE disconnect cycles.
+> - The test run writes synthetic devices, incidents, and events into the database.
+
+### Database Cleanup After Testing
+To reset your database to a pristine demo state after running tests:
+```bash
+# 1. Drop test collections via helper script
+npx tsx scripts/cleanup.ts
+
+# 2. Re-seed default operational rules and operators
+npm run seed
+```
+
+### Individual Test Suites
+```bash
+npm run test:unit          # Vitest unit tests (API & Worker health/readiness probes)
+npm run test:acceptance    # Phase 1: Ingestion, dedupe, rejection, queue backpressure
+npm run test:phase2        # Phase 2: Rules engine, evaluations, sweeper, replay isolation
+npm run test:phase3        # Phase 3: Incidents, deduplication, outbox atomicity, dispatcher
+npm run test:phase4        # Phase 4: Realtime SSE, Last-Event-ID, multi-instance fan-out
+```
+
+Detailed test proofs and results are documented in [docs/TEST_REPORT.md](docs/TEST_REPORT.md).
+
 ---
 
-## ⚠️ Known Limitations & Edge Cases
+## 🩺 Service Health Probes
 
-- **Redis Lua Script `cjson` Serialization Quirk**:
-  - The atomic publication Lua script (`ATOMIC_PUBLISH_LUA` in `@fleet/config`) decodes and re-encodes event payloads using Redis's built-in `cjson` library to guarantee atomic stream ID allocation and Pub/Sub fanout.
-  - In Lua tables, empty associative dictionaries cannot be distinguished from empty arrays, so `cjson` encodes `{}` as `[]`. If an event or telemetry payload contains an empty object (`{}`), it will appear on the live SSE stream as `[]`. Objects with keys are serialized normally.
+Both services expose standard liveness and deep readiness endpoints:
+
+| Service | Port | Endpoint | Description | Verification Command |
+| :--- | :--- | :--- | :--- | :--- |
+| **API** | `3000` | `GET /healthz` | Cheap, non-blocking liveness check | `curl http://localhost:3000/healthz` |
+| **API** | `3000` | `GET /readyz` | Deep readiness: MongoDB & Redis (2s timeout) | `curl http://localhost:3000/readyz` |
+| **Worker** | `3001` | `GET /healthz` | Cheap, non-blocking liveness check | `curl http://localhost:3001/healthz` |
+| **Worker** | `3001` | `GET /readyz` | Deep readiness: Mongo, Redis, & BullMQ Queue | `curl http://localhost:3001/readyz` |
 
 ---
 
-## 📚 Detailed Documentation
+## 🐳 Docker Deployment (Optional)
 
-- [System Architecture](docs/ARCHITECTURE.md) - Event pipelines, reliability guarantees, and observability design
-- [Architecture Decisions (ADRs)](docs/DECISIONS.md) - Trade-off analysis and rationale for technical choices
-- [Deployment & Operations Guide](docs/DEPLOYMENT.md) - Runbooks, environment variables, and verification
+If preferred, Docker Compose can orchestrate the entire platform with local MongoDB and Redis:
 
+```bash
+# Build and run all containers
+docker compose up --build
+
+# Tear down containers and volumes
+docker compose down -v
+```
+
+---
+
+## 📚 Technical Documentation
+
+- [System Architecture](docs/ARCHITECTURE.md) - Architecture diagrams, sequence flows, and component specs.
+- [Device Ingestion Protocol](docs/PROTOCOL.md) - Payload schema, batch formats, headers, and retry semantics.
+- [Architecture Decisions (ADRs)](docs/DECISIONS.md) - Technical rationale, trade-off analysis, and alternatives.
+- [Reliability & Failure Recovery](docs/RELIABILITY.md) - Failure scenarios, recovery mechanisms, and testing matrix.
+- [Known Limitations](docs/LIMITATIONS.md) - Transparent assessment of trade-offs, constraints, and edge cases.
+- [Production Deployment Guide](docs/DEPLOYMENT.md) - Kubernetes, ECS, MQTT gateway, CDN, and autoscaling.
+- [Automated Test Report](docs/TEST_REPORT.md) - Verified test results, proof analysis, and execution timings.
