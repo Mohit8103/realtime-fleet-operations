@@ -7,6 +7,7 @@ import { setupTelemetryConsumer } from './consumer/telemetryConsumer.js';
 import { setupStaleDeviceDetector } from './engine/staleDetector.js';
 import { setupEventSweeper } from './engine/sweeper.js';
 import { setupNotificationDispatcher } from './notifications/notificationDispatcher.js';
+import { setupOutboxRepairSweeper } from './engine/incidentManager.js';
 
 export const logger = createLogger({ service: 'worker' });
 
@@ -67,6 +68,10 @@ async function bootstrap() {
     const dispatcher = setupNotificationDispatcher(2000);
     logger.info('📢 Notification outbox dispatcher initialized (poll interval: 2s)');
 
+    // 8. Initialize Outbox Repair Sweeper (startup + 60s periodic)
+    const outboxSweeper = setupOutboxRepairSweeper(60000);
+    logger.info('🔧 Outbox repair sweeper initialized (startup + 60s periodic)');
+
     let isShuttingDown = false;
 
     async function gracefulShutdown(signal: string) {
@@ -76,6 +81,9 @@ async function bootstrap() {
       logger.info({ signal }, 'Worker received shutdown signal. Terminating gracefully...');
 
       try {
+        outboxSweeper.stop();
+        logger.info('Outbox repair sweeper stopped.');
+
         dispatcher.stop();
         logger.info('Notification dispatcher stopped.');
 

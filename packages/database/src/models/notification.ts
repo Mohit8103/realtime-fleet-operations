@@ -23,7 +23,7 @@ export interface INotification extends Document {
 const notificationSchema = new Schema<INotification>(
   {
     notificationId: { type: String, required: true, unique: true, index: true },
-    incidentId: { type: String, required: true, index: true },
+    incidentId: { type: String, required: true, unique: true, index: true },
     operatorId: { type: String, default: null, index: true },
     status: {
       type: String,

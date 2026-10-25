@@ -102,6 +102,15 @@ export async function executeStaleScan(): Promise<void> {
           continue;
         }
 
+        // Verify fresh lastSeenAt from DB to prevent racing with recently arrived events
+        const freshDev = await Device.findOne({ deviceId: device.deviceId }, { lastSeenAt: 1 }).lean();
+        if (freshDev?.lastSeenAt) {
+          const freshDiff = (Date.now() - new Date(freshDev.lastSeenAt).getTime()) / 1000;
+          if (freshDiff <= thresholdSeconds) {
+            continue;
+          }
+        }
+
         // Suppression 2: Cooldown (if configured)
         if (rule.cooldownSeconds > 0) {
           const lastInc = await Incident.findOne({

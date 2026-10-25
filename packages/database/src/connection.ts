@@ -37,6 +37,17 @@ export async function connectMongo(): Promise<typeof mongoose> {
     isConnected = true;
     logger.info('✅ MongoDB connected successfully');
 
+    // Drop legacy non-unique incidentId_1 index on notifications if it exists
+    try {
+      const notifIndexes = await Notification.collection.indexes();
+      const existingIncId = notifIndexes.find((i) => i.name === 'incidentId_1');
+      if (existingIncId && !existingIncId.unique) {
+        await Notification.collection.dropIndex('incidentId_1');
+      }
+    } catch {
+      // ignore
+    }
+
     // Ensure all unique indexes are initialized at startup
     await Promise.allSettled([
       Event.init(),

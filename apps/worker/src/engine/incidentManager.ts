@@ -4,6 +4,8 @@ import {
   Notification,
   Operator,
   Rule,
+  Device,
+  mongoose,
   type IIncident,
   type IDevice,
   type IEvent,
@@ -88,61 +90,72 @@ export async function recordIncidentMatch(params: {
     return { incident: existing, isCreated: false };
   }
 
-  // 2. No non-resolved incident exists -> create a new one
-  try {
-    const incidentId = crypto.randomUUID();
-    const operatorId = await resolveOperatorId(rule, device);
+  // 2. No non-resolved incident exists -> create a new one inside a single MongoDB transaction
+  const operatorId = await resolveOperatorId(rule, device);
+  const incidentId = crypto.randomUUID();
 
-    const newIncident = await Incident.create({
-      incidentId,
-      deviceId: device.deviceId,
-      ruleId,
-      ruleName: rule.name,
-      dedupeKey,
-      severity: rule.severity,
-      state: 'open',
-      fromReplay: isReplay,
-      eventId,
-      firstEventId: eventId,
-      lastEventId: eventId,
-      occurrenceCount: 1,
-      triggeringEvents: eventId ? [eventId] : [],
-      timeline: [
-        {
-          action: 'created',
-          timestamp: new Date(),
-          note: matchReason
-        }
-      ],
-      createdAt: new Date()
+  const session = await mongoose.startSession();
+  try {
+    let createdIncident: IIncident | null = null;
+
+    await session.withTransaction(async () => {
+      const createdDocs = await Incident.create(
+        [
+          {
+            incidentId,
+            deviceId: device.deviceId,
+            ruleId,
+            ruleName: rule.name,
+            dedupeKey,
+            severity: rule.severity,
+            state: 'open',
+            fromReplay: isReplay,
+            eventId,
+            firstEventId: eventId,
+            lastEventId: eventId,
+            occurrenceCount: 1,
+            triggeringEvents: eventId ? [eventId] : [],
+            timeline: [
+              {
+                action: 'created',
+                timestamp: new Date(),
+                note: matchReason
+              }
+            ],
+            createdAt: new Date()
+          }
+        ],
+        { session }
+      );
+      createdIncident = createdDocs[0];
+
+      // Write transactional outbox notification in the same transaction
+      await Notification.create(
+        [
+          {
+            notificationId: crypto.randomUUID(),
+            incidentId,
+            operatorId,
+            status: 'pending',
+            attempts: 0,
+            maxAttempts: config.notifications.maxAttempts,
+            nextAttemptAt: new Date(),
+            idempotencyKey: crypto.randomUUID(),
+            payload: {
+              incidentId,
+              ruleId,
+              ruleName: rule.name,
+              deviceId: device.deviceId,
+              severity: rule.severity,
+              reason: matchReason
+            }
+          }
+        ],
+        { session }
+      );
     });
 
-    // Write transactional outbox notification ONLY on creation
-    try {
-      await Notification.create({
-        notificationId: crypto.randomUUID(),
-        incidentId: newIncident.incidentId,
-        operatorId,
-        status: 'pending',
-        attempts: 0,
-        maxAttempts: config.notifications.maxAttempts,
-        nextAttemptAt: new Date(),
-        idempotencyKey: crypto.randomUUID(),
-        payload: {
-          incidentId: newIncident.incidentId,
-          ruleId,
-          ruleName: rule.name,
-          deviceId: device.deviceId,
-          severity: rule.severity,
-          reason: matchReason
-        }
-      });
-    } catch (notifErr: any) {
-      // Notification failure must NEVER block or roll back incident creation
-      logger.error({ err: notifErr.message }, 'Failed to write notification outbox; incident creation preserved');
-    }
-
-    return { incident: newIncident, isCreated: true };
+    return { incident: createdIncident!, isCreated: true };
   } catch (err: any) {
     // 3. Handle concurrent race condition (E11000 duplicate key error)
     if (err.code === 11000 || String(err.message).includes('E11000')) {
@@ -181,6 +194,8 @@ export async function recordIncidentMatch(params: {
     }
 
     throw err;
+  } finally {
+    await session.endSession();
   }
 }
 
@@ -231,3 +246,118 @@ export async function autoResolveStaleIncidents(device: IDevice, event: IEvent):
     return 0;
   }
 }
+
+/**
+ * Outbox Repair Sweep:
+ * Finds incidents in state 'open' created more than 30 seconds ago
+ * that have no notification record in the outbox, and idempotently creates one.
+ */
+export async function repairOutboxSweep(olderThanMs = 30000): Promise<number> {
+  const cutoff = new Date(Date.now() - olderThanMs);
+
+  try {
+    const unnotifiedIncidents = await Incident.find({
+      state: 'open',
+      createdAt: { $lte: cutoff }
+    });
+
+    if (!unnotifiedIncidents.length) return 0;
+
+    let repaired = 0;
+
+    for (const incident of unnotifiedIncidents) {
+      // Check if notification already exists for this incident
+      const exists = await Notification.exists({ incidentId: incident.incidentId });
+      if (exists) continue;
+
+      // Find rule and device to resolve operator
+      let operatorId: string | null = null;
+      try {
+        const isOid = mongoose.Types.ObjectId.isValid(incident.ruleId);
+        const [ruleDoc, deviceDoc] = await Promise.all([
+          isOid ? Rule.findById(incident.ruleId).lean() : Rule.findOne({ name: incident.ruleName }).lean(),
+          Device.findOne({ deviceId: incident.deviceId }).lean()
+        ]);
+        if (ruleDoc && deviceDoc) {
+          operatorId = await resolveOperatorId(ruleDoc as any, deviceDoc as any);
+        } else if (ruleDoc?.notifyOperator) {
+          operatorId = ruleDoc.notifyOperator;
+        }
+      } catch (opErr: any) {
+        logger.debug({ err: opErr.message }, 'Could not resolve operator for repaired incident notification');
+      }
+
+      try {
+        await Notification.create({
+          notificationId: crypto.randomUUID(),
+          incidentId: incident.incidentId,
+          operatorId,
+          status: 'pending',
+          attempts: 0,
+          maxAttempts: config.notifications.maxAttempts,
+          nextAttemptAt: new Date(),
+          idempotencyKey: crypto.randomUUID(),
+          payload: {
+            incidentId: incident.incidentId,
+            ruleId: incident.ruleId,
+            ruleName: incident.ruleName,
+            deviceId: incident.deviceId,
+            severity: incident.severity,
+            reason: incident.reason || incident.timeline?.[0]?.note || 'Repaired outbox notification'
+          }
+        });
+        repaired++;
+        logger.info(
+          { incidentId: incident.incidentId },
+          '🔧 Outbox repair sweep created missing notification record'
+        );
+      } catch (createErr: any) {
+        // E11000 duplicate key error on incidentId or notificationId (handled idempotently)
+        if (createErr.code === 11000 || String(createErr.message).includes('E11000')) {
+          logger.debug({ incidentId: incident.incidentId }, 'Notification already created concurrently');
+        } else {
+          logger.error({ err: createErr.message, incidentId: incident.incidentId }, 'Failed to create repaired notification');
+        }
+      }
+    }
+
+    return repaired;
+  } catch (err: any) {
+    logger.error({ err: err.message }, 'Failed during outbox repair sweep');
+    return 0;
+  }
+}
+
+/**
+ * Setup Outbox Repair Sweeper in the background worker:
+ * Runs immediately at startup, then periodically every 60 seconds.
+ */
+export function setupOutboxRepairSweeper(intervalMs = 60000) {
+  let isRunning = false;
+
+  const runSweep = async () => {
+    if (isRunning) return;
+    isRunning = true;
+    try {
+      await repairOutboxSweep(30000);
+    } catch (err: any) {
+      logger.error({ err: err.message }, 'Error during outbox repair sweep execution');
+    } finally {
+      isRunning = false;
+    }
+  };
+
+  // 1. Startup sweep
+  runSweep().catch(() => {});
+
+  // 2. Periodic sweep every 60 seconds
+  const timer = setInterval(() => {
+    runSweep().catch(() => {});
+  }, intervalMs);
+
+  return {
+    stop: () => clearInterval(timer),
+    runNow: runSweep
+  };
+}
+

@@ -46,7 +46,7 @@ async function runPhase3Tests() {
     name: { $in: ['Heavy Load Temp Alert', 'Stale Detector Hygiene Test Rule'] }
   });
 
-  const { recordIncidentMatch, resolveOperatorId } = await import('./apps/worker/dist/engine/incidentManager.js');
+  const { recordIncidentMatch, resolveOperatorId, repairOutboxSweep } = await import('./apps/worker/dist/engine/incidentManager.js');
   const { executeStaleScan } = await import('./apps/worker/dist/engine/staleDetector.js');
   const {
     claimNextNotification,
@@ -633,6 +633,115 @@ async function runPhase3Tests() {
   // Restore webhook toggle
   await call('/v1/admin/mock-webhook', { body: { fail: false } });
   console.log('✅ TEST 9 PASSED: Notification transitions to dead after MAX_NOTIFY_ATTEMPTS.\n');
+
+  // --------------------------------------------------------------------------
+  // TEST 10: Outbox Atomicity & Repair Sweep (Crash Recovery & Unique Constraint)
+  // --------------------------------------------------------------------------
+  console.log('--- TEST 10: Outbox Atomicity & Repair Sweep Crash Simulation ---');
+  // 10a. Simulate crash between incident creation and notification creation:
+  // Create an open incident backdated > 30s ago with NO notification record
+  const crashIncidentId = crypto.randomUUID();
+  const crashDeviceId = 'dev-crash-' + Date.now();
+  const crashRuleId = new mongoose.Types.ObjectId().toString();
+
+  await Incident.create({
+    incidentId: crashIncidentId,
+    deviceId: crashDeviceId,
+    ruleId: crashRuleId,
+    ruleName: 'Simulated Crash Rule',
+    dedupeKey: `${crashRuleId}:${crashDeviceId}`,
+    severity: 'high',
+    state: 'open',
+    fromReplay: false,
+    occurrenceCount: 1,
+    triggeringEvents: [],
+    timeline: [
+      {
+        action: 'created',
+        timestamp: new Date(Date.now() - 40000),
+        note: 'Incident created before crash'
+      }
+    ],
+    createdAt: new Date(Date.now() - 40000) // 40 seconds ago (> 30s threshold)
+  });
+
+  // Verify that no notification exists initially
+  const initialNotif = await Notification.findOne({ incidentId: crashIncidentId });
+  console.log('10a. Simulated crash incident created. Notification exists?', Boolean(initialNotif));
+  if (initialNotif) {
+    throw new Error('Initial notification should not exist before repair sweep');
+  }
+
+  // 10b. Run repair sweep
+  console.log('10b. Running repairOutboxSweep()...');
+  const repairedCount = await repairOutboxSweep(30000);
+  console.log(`     Repaired count: ${repairedCount}`);
+
+  const repairedNotif = await Notification.findOne({ incidentId: crashIncidentId }).lean();
+  console.log('10c. Post-sweep notification found:', Boolean(repairedNotif), 'status:', repairedNotif?.status);
+  if (!repairedNotif || repairedNotif.status !== 'pending') {
+    throw new Error('Repair sweep failed to create pending notification for unnotified incident');
+  }
+
+  // 10d. Test idempotency: run repair sweep again, count must remain exactly 1
+  console.log('10d. Running repairOutboxSweep() again to test idempotency...');
+  await repairOutboxSweep(30000);
+  const countAfterSecondSweep = await Notification.countDocuments({ incidentId: crashIncidentId });
+  console.log(`     Notification count after second sweep: ${countAfterSecondSweep} (expected exactly 1)`);
+  if (countAfterSecondSweep !== 1) {
+    throw new Error(`Expected exactly 1 notification after repeat sweep, got: ${countAfterSecondSweep}`);
+  }
+
+  // 10e. Test unique index on notifications.incidentId
+  console.log('10e. Testing unique index on notifications.incidentId rejects duplicate insert...');
+  let dupRejected = false;
+  try {
+    await Notification.create({
+      notificationId: crypto.randomUUID(),
+      incidentId: crashIncidentId, // Duplicate incidentId
+      status: 'pending',
+      attempts: 0,
+      maxAttempts: 5,
+      nextAttemptAt: new Date(),
+      idempotencyKey: crypto.randomUUID(),
+      payload: { test: 'duplicate' }
+    });
+  } catch (dupErr) {
+    if (dupErr.code === 11000 || String(dupErr.message).includes('E11000')) {
+      dupRejected = true;
+    }
+  }
+  console.log('     Duplicate notification insert rejected by unique index?', dupRejected);
+  if (!dupRejected) {
+    throw new Error('Expected duplicate notification on same incidentId to fail with E11000 unique index violation!');
+  }
+
+  // 10f. Test transactional atomicity of recordIncidentMatch
+  console.log('10f. Testing recordIncidentMatch atomicity with session.withTransaction...');
+  const devAtomic = { deviceId: 'dev-atomic-' + Date.now(), location: 'apac' };
+  const atomicRule = {
+    _id: new mongoose.Types.ObjectId(),
+    name: 'Transactional Atomicity Rule',
+    severity: 'critical'
+  };
+
+  const atomicMatch = await recordIncidentMatch({
+    rule: atomicRule,
+    device: devAtomic,
+    event: { eventId: crypto.randomUUID() },
+    isReplay: false,
+    matchReason: 'Testing session.withTransaction atomicity'
+  });
+
+  const [atomicIncDoc, atomicNotifDoc] = await Promise.all([
+    Incident.findOne({ incidentId: atomicMatch.incident.incidentId }),
+    Notification.findOne({ incidentId: atomicMatch.incident.incidentId })
+  ]);
+  console.log(`     Incident created: ${Boolean(atomicIncDoc)}, Notification created: ${Boolean(atomicNotifDoc)}`);
+  if (!atomicIncDoc || !atomicNotifDoc) {
+    throw new Error('Transactional creation failed to write both incident and notification');
+  }
+  console.log('✅ TEST 10 PASSED: Outbox repair sweep and unique index guarantee outbox atomicity.\n');
 
   // Cleanup DB connection
   await mongoose.disconnect();
