@@ -12,3 +12,5 @@ coverage
 .cache
 .turbo
 .manual.json
+.simulator-keys.json
+.simulator-buffer.json
