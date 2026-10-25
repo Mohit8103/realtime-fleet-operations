@@ -5,9 +5,58 @@
 [![Architecture](https://img.shields.io/badge/Docs-Architecture-blueviolet.svg)](docs/ARCHITECTURE.md)
 [![Test Report](https://img.shields.io/badge/Docs-Test%20Report-success.svg)](docs/TEST_REPORT.md)
 
-An enterprise-grade, event-driven **Real-Time Operations Platform** for device fleet telemetry monitoring, rules evaluation, incident orchestration, and live operations dashboarding.
+An enterprise-grade, event-driven fleet operations platform engineered for mission-critical IoT device telemetry, automated rule evaluations, incident orchestration, and live operations monitoring. The system is built around a core reliability philosophy: **at-least-once delivery paired with idempotent, deduplicated processing**. Network drops, out-of-order bursts, edge buffering, worker crashes, and concurrent rule evaluations are absorbed seamlessly through deterministic event deduplication (`eventId`), MongoDB partial unique indexes, an atomic transactional outbox, and real-time Server-Sent Events (SSE) stream synchronization.
 
-Built with a focus on **operational reliability, predictable latency, fault-tolerance, and deep observability**.
+**Demo video**: [VIDEO_LINK]
+
+### Screenshots
+| Overview Dashboard | Incident Management | Real-time Stream Banner |
+| :---: | :---: | :---: |
+| ![Overview](docs/images/overview.png) | ![Incidents](docs/images/incidents.png) | ![Connection Banner](docs/images/connection-banner.png) |
+
+*(See [docs/images/README.md](docs/images/README.md) for screenshot guidelines).*
+
+---
+
+## ⚡ Reviewer Quick Start
+
+Follow these 8 steps to run the complete platform from scratch:
+
+1. **Create MongoDB Atlas Database**: Create a free [MongoDB Atlas](https://www.mongodb.com/cloud/atlas) M0 cluster. Under **Network Access**, allow access from anywhere (`0.0.0.0/0`). Under **Database Access**, create a user with a letters-and-numbers password (e.g. `user123Pass`), and copy the connection string (`mongodb+srv://...`).
+2. **Create Redis Cloud Database**: Create a free [Redis Cloud](https://redis.io/cloud/) database. Copy the public endpoint (`<host>:<port>`) and password, and construct the connection string: `redis://default:<password>@<host>:<port>` (or `rediss://` if TLS is enabled). *Note: special characters in passwords must be URL-encoded (e.g., `@` becomes `%40`, `#` becomes `%23`) or avoided.*
+3. **Configure Environment**: Copy `.env.example` to `.env` and paste both connection strings:
+   ```bash
+   cp .env.example .env
+   ```
+4. **Install Dependencies**:
+   ```bash
+   npm install
+   ```
+5. **Initialize Database & Seed Rules**:
+   ```bash
+   npm run reset-data
+   ```
+6. **Start All Services**:
+   ```bash
+   npm run dev
+   ```
+7. **Open Operations Dashboard**:
+   Navigate to **[http://localhost:5173](http://localhost:5173)** in your browser.
+8. **Run Offline Replay Demo**:
+   In a second terminal, launch the offline failure and replay simulation:
+   ```bash
+   npm run demo:offline
+   ```
+
+---
+
+## 🧭 Where to Look
+
+For in-depth architectural analysis and engineering guarantees:
+- **[System Architecture](docs/ARCHITECTURE.md)**: End-to-end component flow, Mermaid architecture diagrams, and the offline buffer/replay sequence.
+- **[Reliability & Recovery Matrix](docs/RELIABILITY.md)**: Failure scenarios, deduplication strategies, backpressure protection, and recovery guarantees.
+- **[Architectural Decisions (ADRs)](docs/DECISIONS.md)**: Transport protocols (HTTP vs MQTT/WS), database selection (Mongo vs Postgres), queue choice (BullMQ vs Kafka), and transactional outbox.
+- **[Known Limitations](docs/LIMITATIONS.md)**: Transparent trade-offs, constraints, clock-skew handling, and production scaling recommendations.
 
 ---
 
@@ -16,7 +65,7 @@ Built with a focus on **operational reliability, predictable latency, fault-tole
 - **Node.js**: Version `20.0.0` or higher (tested on Node 20, 22, and 24).
 - **npm**: Version `10.0.0` or higher.
 - **MongoDB**: A free [MongoDB Atlas](https://www.mongodb.com/cloud/atlas) M0 cluster (or local MongoDB 7.0).
-- **Redis**: A free [Upstash Redis](https://upstash.com/) or [Redis Cloud](https://redis.io/cloud/) database (or local Redis 7.2).
+- **Redis**: A free [Redis Cloud](https://redis.io/cloud/) database (or local Redis 7.2).
 - *(Optional)* **Docker & Docker Compose**: Docker is secondary and optional; all services can run locally via native Node.js.
 
 > [!CAUTION]
@@ -24,7 +73,7 @@ Built with a focus on **operational reliability, predictable latency, fault-tole
 
 ---
 
-## ⚙️ Setup & Installation
+## ⚙️ Setup & Detailed Configuration
 
 ### 1. Clone & Install Dependencies
 ```bash
@@ -45,11 +94,11 @@ cp .env.example .env
 
 Edit `.env` and configure your cloud database endpoints:
 ```env
-# MongoDB Atlas Connection URI
+# MongoDB Atlas Connection URI (letters & numbers password recommended)
 MONGO_URL=mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/fleet_ops?retryWrites=true&w=majority
 
-# Upstash Redis / Redis Cloud Connection URI (with TLS)
-REDIS_URL=rediss://default:<password>@<endpoint>.upstash.io:6379
+# Redis Cloud Connection URI (note rediss:// if TLS is required; special characters in passwords must be URL-encoded or avoided)
+REDIS_URL=redis://default:<password>@<host>:<port>
 
 # Service Ports & Host Bindings
 NODE_ENV=development
@@ -59,10 +108,13 @@ WEB_PORT=5173
 CORS_ORIGIN=http://localhost:5173
 ```
 
-### 3. Seed Database
-Initialize default operational rules and primary operators:
+> [!TIP]
+> **URL Encoding Special Characters**: If your Redis password contains reserved characters (such as `@`, `:`, or `#`), they must be URL-encoded (for example `@` becomes `%40`, `#` becomes `%23`), or simply use an alphanumeric password.
+
+### 3. Initialize Database & Seed Default Rules
+Wipe test data and seed the default operational rules (`High Heat Alert` and `Stale Device Alert`) and primary operator:
 ```bash
-npm run seed
+npm run reset-data
 ```
 
 ### 4. Start Local Development Stack
@@ -118,13 +170,13 @@ npm run demo:chaos
 1. **0s – 20s (Live Sending)**: All 3 devices stream regular readings and heartbeats. Dashboard shows devices as `online` with events updating smoothly.
 2. **20s – 110s (Offline Window)**:
    - Devices stop transmitting over HTTP and buffer events in local memory and disk (`.simulator-buffer.json`).
-   - The simulator console shows `state: offline` and `buffered` climbing.
-   - After ~60 seconds of inactivity, the worker's stale detector triggers and flags devices as `stale`, opening `Stale Device Alert` incidents on the dashboard.
+   - The simulator console shows `state: offline` and `buffered` climbing (~270–300 events).
+   - About 30 seconds after each device's last event (around the 50-second mark), the worker's stale detector flags each device as `stale`, opening a `Stale Device Alert` incident on the dashboard (one per device, not a pile-up).
 3. **110s+ (Replay & Recovery)**:
    - Simulator reconnects and displays `state: replaying`.
    - Buffered events are drained in sequential batches of 50 via `POST /v1/events/batch` with `replayed: true`.
    - Replayed events preserve their original historical generation timestamps and do **not** falsely mark devices online.
-   - Once the buffer decrements to `0`, live sending resumes (`state: online`), fresh events update `lastSeenAt`, and the open stale incidents **auto-resolve automatically** (`resolvedBy: "system:auto-resolve"`).
+   - Once the buffer decrements to `0`, live sending resumes (`state: online`), fresh events update `lastSeenAt`, and the open `Stale Device Alert` incidents **auto-resolve automatically** (`resolvedBy: "system:auto-resolve"`).
 
 ---
 
