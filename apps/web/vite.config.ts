@@ -45,10 +45,22 @@ export default defineConfig({
   plugins: [react(), healthzPlugin()],
   server: {
     port: 5173,
-    host: true
+    host: true,
+    proxy: {
+      '/v1': {
+        target: 'http://localhost:3000',
+        changeOrigin: true
+      }
+    }
   },
   preview: {
     port: 5173,
-    host: true
+    host: true,
+    proxy: {
+      '/v1': {
+        target: 'http://localhost:3000',
+        changeOrigin: true
+      }
+    }
   }
 });
