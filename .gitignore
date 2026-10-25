@@ -15,3 +15,4 @@ coverage
 .simulator-keys.json
 .simulator-buffer.json
 fresh-clone/
+fresh-test-clone/
