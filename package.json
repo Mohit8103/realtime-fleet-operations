@@ -16,6 +16,7 @@
     "dev:simulator": "npm run dev --workspace=@fleet/simulator",
     "simulate": "tsx apps/simulator/src/index.ts",
     "build": "npm run build --workspaces --if-present",
+    "seed": "tsx scripts/seed.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:acceptance": "node test-acceptance.mjs",

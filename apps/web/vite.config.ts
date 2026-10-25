@@ -49,7 +49,18 @@ export default defineConfig({
     proxy: {
       '/v1': {
         target: 'http://localhost:3000',
-        changeOrigin: true
+        changeOrigin: true,
+        timeout: 0,
+        proxyTimeout: 0,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq, req) => {
+            if (req.url?.includes('/stream')) {
+              proxyReq.setHeader('Cache-Control', 'no-cache');
+              proxyReq.setHeader('Connection', 'keep-alive');
+              proxyReq.setHeader('X-Accel-Buffering', 'no');
+            }
+          });
+        }
       }
     }
   },
@@ -59,7 +70,9 @@ export default defineConfig({
     proxy: {
       '/v1': {
         target: 'http://localhost:3000',
-        changeOrigin: true
+        changeOrigin: true,
+        timeout: 0,
+        proxyTimeout: 0
       }
     }
   }

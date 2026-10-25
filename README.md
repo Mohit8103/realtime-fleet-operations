@@ -154,8 +154,17 @@ npm test
 
 ---
 
+## ⚠️ Known Limitations & Edge Cases
+
+- **Redis Lua Script `cjson` Serialization Quirk**:
+  - The atomic publication Lua script (`ATOMIC_PUBLISH_LUA` in `@fleet/config`) decodes and re-encodes event payloads using Redis's built-in `cjson` library to guarantee atomic stream ID allocation and Pub/Sub fanout.
+  - In Lua tables, empty associative dictionaries cannot be distinguished from empty arrays, so `cjson` encodes `{}` as `[]`. If an event or telemetry payload contains an empty object (`{}`), it will appear on the live SSE stream as `[]`. Objects with keys are serialized normally.
+
+---
+
 ## 📚 Detailed Documentation
 
 - [System Architecture](docs/ARCHITECTURE.md) - Event pipelines, reliability guarantees, and observability design
 - [Architecture Decisions (ADRs)](docs/DECISIONS.md) - Trade-off analysis and rationale for technical choices
 - [Deployment & Operations Guide](docs/DEPLOYMENT.md) - Runbooks, environment variables, and verification
+
