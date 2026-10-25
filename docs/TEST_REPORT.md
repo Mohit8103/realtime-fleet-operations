@@ -10,13 +10,18 @@
 
 ## 1. Consolidated Test Suite Execution Summary
 
-| Suite # | Suite Name | Scope & Coverage | Status |
-|:-------:|:-----------|:-----------------|:------:|
-| **1** | **Unit Tests** | API & Worker `/healthz` liveness, `/readyz` dependency checks (Mongo, Redis, BullMQ Queue), correlation ID propagation | ✅ PASSED |
-| **2** | **Phase 1 Acceptance Suite** | Single/batch ingestion, MongoDB E11000 duplicate deduplication, schema validation & rejection storage, rate-limiting & backpressure | ✅ PASSED |
-| **3** | **Phase 2 Acceptance Suite** | Rules engine thresholds, explainability audit records, queue recovery sweeper, historical replayed telemetry isolation | ✅ PASSED |
-| **4** | **Phase 3 Acceptance Suite** | Concurrency deduplication (20 threads -> 1 incident), transactional outbox atomicity, crash recovery lease reclaim, dead-letter transitions | ✅ PASSED |
-| **5** | **Phase 4 Acceptance Suite** | Server-Sent Events (SSE), Last-Event-ID resumption, resync_required fallback, 500-burst zero-drop guarantee, multi-instance API fan-out | ✅ PASSED |
+| Suite # | Suite Name | Scope & Coverage | Duration | Status |
+|:-------:|:-----------|:-----------------|:--------:|:------:|
+| **1** | **Unit Tests** | API & Worker `/healthz` liveness, `/readyz` dependency checks (Mongo, Redis, BullMQ Queue), correlation ID propagation | `5.46s` | ✅ PASSED (5 tests) |
+| **2** | **Phase 1 Acceptance Suite** | Single/batch ingestion, MongoDB E11000 duplicate deduplication, schema validation & rejection storage, rate-limiting & backpressure | `23.92s` | ✅ PASSED (10 steps) |
+| **3** | **Phase 2 Acceptance Suite** | Rules engine thresholds, explainability audit records, queue recovery sweeper, historical replayed telemetry isolation | `43.80s` | ✅ PASSED (8 steps) |
+| **4** | **Phase 3 Acceptance Suite** | Concurrency deduplication (20 threads -> 1 incident), transactional outbox atomicity, crash recovery lease reclaim, dead-letter transitions | `102.80s` | ✅ PASSED (10 steps) |
+| **5** | **Phase 4 Acceptance Suite** | Server-Sent Events (SSE), Last-Event-ID resumption, resync_required fallback, 500-burst zero-drop guarantee, multi-instance API fan-out | `82.47s` | ✅ PASSED (7 steps) |
+| **Total** | **Consolidated Run (`npm test`)** | **Full end-to-end failure scenario test suite** | **258.45s** | **100% SUCCESS** |
+
+> [!NOTE]
+> **Regarding "Dead Notifications" in `/v1/stats`**:
+> The 2 dead notifications displayed in `/v1/stats` (`notifications: { pending: 0, failed: 0, dead: 2, sent: 400 }`) are the expected result of **Phase 3 Test 9** (`test-phase3.mjs:615: Dead Letter Transition after MAX_NOTIFY_ATTEMPTS`). Test 9 deliberately exhausts 5 delivery attempts against a failing webhook to verify that unrecoverable notifications correctly transition to status `dead` instead of looping infinitely.
 
 ---
 
