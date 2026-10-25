@@ -87,6 +87,10 @@ export async function recordIncidentMatch(params: {
   );
 
   if (existing) {
+    logger.info(
+      { eventId, deviceId: device.deviceId, incidentId: existing.incidentId, dedupeKey },
+      '🔄 Incident updated (occurrence)'
+    );
     publishRealtimeEvent({ event: 'incident_updated', data: existing.toObject() }).catch(() => {});
     return { incident: existing, isCreated: false };
   }
@@ -156,6 +160,10 @@ export async function recordIncidentMatch(params: {
       );
     });
 
+    logger.info(
+      { eventId, deviceId: device.deviceId, incidentId: createdIncident!.incidentId, dedupeKey },
+      '🚨 Incident created'
+    );
     publishRealtimeEvent({ event: 'incident_created', data: createdIncident!.toObject() }).catch(() => {});
     return { incident: createdIncident!, isCreated: true };
   } catch (err: any) {
@@ -191,6 +199,10 @@ export async function recordIncidentMatch(params: {
       );
 
       if (raced) {
+        logger.info(
+          { eventId, deviceId: device.deviceId, incidentId: raced.incidentId, dedupeKey },
+          '🔄 Incident updated after concurrent race'
+        );
         publishRealtimeEvent({ event: 'incident_updated', data: raced.toObject() }).catch(() => {});
         return { incident: raced, isCreated: false };
       }

@@ -26,4 +26,13 @@ describe('API Health Probe', () => {
     expect(response.body.correlationId).toBe(customCorrelationId);
     expect(response.headers['x-correlation-id']).toBe(customCorrelationId);
   });
+
+  it('GET /readyz returns 200 or 503 with per-dependency readiness status', async () => {
+    const response = await request(app).get('/readyz');
+
+    expect([200, 503]).toContain(response.status);
+    expect(response.body).toHaveProperty('dependencies');
+    expect(response.body.dependencies).toHaveProperty('mongo');
+    expect(response.body.dependencies).toHaveProperty('redis');
+  });
 });

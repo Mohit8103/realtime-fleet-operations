@@ -81,6 +81,15 @@ eventsRouter.post(
         req.log?.warn({ err: err.message }, 'Failed to persist rejected event');
       }
 
+      req.log?.warn(
+        {
+          eventId: req.body?.eventId || null,
+          deviceId: req.body?.deviceId || req.device?.deviceId || null,
+          reason: `Validation failed: ${parseResult.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ')}`
+        },
+        'Event rejected: validation failed'
+      );
+
       return res.status(400).json({
         error: 'Validation failed',
         details: parseResult.error.errors
@@ -103,6 +112,11 @@ eventsRouter.post(
         replayed: false,
         processingStatus: 'pending'
       });
+
+      req.log?.info(
+        { eventId: event.eventId, deviceId: event.deviceId },
+        'Event ingested'
+      );
 
       // 2. Fast-path cache in Redis only AFTER successful insert
       try {
@@ -164,6 +178,11 @@ eventsRouter.post(
       // Check for MongoDB duplicate-key error (E11000)
       if (err.code === 11000 || String(err.message).includes('E11000')) {
         redis.incr('stats:duplicates_count').catch(() => {});
+
+        req.log?.info(
+          { eventId: event.eventId, deviceId: event.deviceId },
+          'Duplicate event ignored'
+        );
 
         return res.status(200).json({
           status: 'duplicate',
@@ -245,6 +264,15 @@ eventsRouter.post(
               // ignore persistence failure
             }
 
+            req.log?.warn(
+              {
+                eventId: (rawItem as any)?.eventId || null,
+                deviceId: (rawItem as any)?.deviceId || req.device?.deviceId || null,
+                reason
+              },
+              'Batch event rejected: validation failed'
+            );
+
             results[globalIdx] = {
               status: 'rejected',
               error: 'Validation failed',
@@ -273,6 +301,11 @@ eventsRouter.post(
               replayed: Boolean(event.replayed),
               processingStatus: 'pending'
             });
+
+            req.log?.info(
+              { eventId: event.eventId, deviceId: event.deviceId },
+              'Event ingested (batch)'
+            );
 
             // Fast-path cache in Redis
             try {
@@ -309,6 +342,10 @@ eventsRouter.post(
           } catch (insertErr: any) {
             if (insertErr.code === 11000 || String(insertErr.message).includes('E11000')) {
               duplicateCount++;
+              req.log?.info(
+                { eventId: event.eventId, deviceId: event.deviceId },
+                'Duplicate event ignored (batch)'
+              );
               results[globalIdx] = {
                 status: 'duplicate',
                 eventId: event.eventId,
@@ -326,6 +363,11 @@ eventsRouter.post(
               } catch {
                 // ignore
               }
+
+              req.log?.warn(
+                { eventId: event.eventId, deviceId: event.deviceId, reason: insertErr.message },
+                'Batch event rejected: insert error'
+              );
 
               results[globalIdx] = {
                 status: 'rejected',

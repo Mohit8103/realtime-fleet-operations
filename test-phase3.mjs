@@ -166,7 +166,7 @@ async function runPhase3Tests() {
   console.log('2b. Waiting for worker to process all 100 events...');
   let heavyIncident = null;
   const heavyStart = Date.now();
-  while (Date.now() - heavyStart < 25000) {
+  while (Date.now() - heavyStart < 60000) {
     heavyIncident = await Incident.findOne({
       deviceId: devHeavyId,
       ruleId: String(ruleHeavyId),

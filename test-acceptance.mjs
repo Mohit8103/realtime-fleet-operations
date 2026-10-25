@@ -60,6 +60,9 @@ const counts = {};
 flood.forEach((r) => (counts[r.status] = (counts[r.status] || 0) + 1));
 console.log('\n=== 7. flood of 300 (expect only 202 and/or 429, no 5xx) ===\n', counts);
 
+// Wait for rate limit window to refresh before subsequent tests
+await new Promise((resolve) => setTimeout(resolve, 2000));
+
 // -----------------------------------------------------------------------------
 // Phase 1 Additional Acceptance Tests
 // -----------------------------------------------------------------------------

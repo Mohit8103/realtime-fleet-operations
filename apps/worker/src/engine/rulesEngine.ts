@@ -136,6 +136,16 @@ export async function processEventRules(event: IEvent, device: IDevice): Promise
         }
       }
 
+      logger.info(
+        {
+          eventId: event.eventId,
+          deviceId: event.deviceId,
+          rule: rule.name,
+          matchReason
+        },
+        '🎯 Rule matched by event'
+      );
+
       // Atomically upsert incident with partial unique index guarantee
       const { incident, isCreated } = await recordIncidentMatch({
         rule: rule as any,
@@ -147,9 +157,10 @@ export async function processEventRules(event: IEvent, device: IDevice): Promise
 
       logger.info(
         {
+          eventId: event.eventId,
+          deviceId: event.deviceId,
           incidentId: incident.incidentId,
           rule: rule.name,
-          deviceId: event.deviceId,
           isCreated,
           occurrenceCount: incident.occurrenceCount,
           fromReplay: isReplay

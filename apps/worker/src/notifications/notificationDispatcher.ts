@@ -19,6 +19,7 @@ export async function sendNotification(notification: INotification): Promise<Not
     {
       notificationId: notification.notificationId,
       incidentId: notification.incidentId,
+      deviceId: (notification.payload as any)?.deviceId || null,
       operatorId: notification.operatorId,
       attempt: notification.attempts + 1
     },
@@ -110,7 +111,11 @@ export async function processNotification(notification: INotification): Promise<
     await notification.save();
 
     logger.info(
-      { notificationId: notification.notificationId, incidentId: notification.incidentId },
+      {
+        notificationId: notification.notificationId,
+        incidentId: notification.incidentId,
+        deviceId: (notification.payload as any)?.deviceId || null
+      },
       '✅ Notification successfully delivered'
     );
     return true;
@@ -141,6 +146,7 @@ export async function processNotification(notification: INotification): Promise<
       {
         notificationId: notification.notificationId,
         incidentId: notification.incidentId,
+        deviceId: (notification.payload as any)?.deviceId || null,
         attempts,
         maxAttempts: notification.maxAttempts,
         error: notification.lastError
@@ -159,6 +165,8 @@ export async function processNotification(notification: INotification): Promise<
     logger.warn(
       {
         notificationId: notification.notificationId,
+        incidentId: notification.incidentId,
+        deviceId: (notification.payload as any)?.deviceId || null,
         attempts,
         nextAttemptInMs: delayMs,
         error: notification.lastError

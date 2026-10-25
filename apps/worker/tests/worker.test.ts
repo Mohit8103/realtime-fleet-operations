@@ -30,4 +30,23 @@ describe('Worker Health Server', () => {
     expect(data.status).toBe('ok');
     expect(data.service).toBe('worker');
   });
+
+  it('responds to GET /readyz with per-dependency readiness status', async () => {
+    const data = await new Promise<{ status: string; service: string; dependencies: any }>((resolve, reject) => {
+      http.get(`http://localhost:${testPort}/readyz`, (res) => {
+        expect([200, 503]).toContain(res.statusCode);
+        let raw = '';
+        res.on('data', (chunk) => (raw += chunk));
+        res.on('end', () => resolve(JSON.parse(raw)));
+        res.on('error', reject);
+      });
+    });
+
+    expect(['ready', 'not_ready']).toContain(data.status);
+    expect(data.service).toBe('worker');
+    expect(data).toHaveProperty('dependencies');
+    expect(data.dependencies).toHaveProperty('mongo');
+    expect(data.dependencies).toHaveProperty('redis');
+    expect(data.dependencies).toHaveProperty('queue');
+  });
 });
