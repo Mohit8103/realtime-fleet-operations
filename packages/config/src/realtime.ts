@@ -30,9 +30,23 @@ export const REALTIME_PUBSUB_CHANNEL = 'fleet:pubsub:sse';
 export const REALTIME_SEQ_KEY = 'fleet:stream:id_seq';
 export const REALTIME_ACTIVITY_KEY = 'fleet:activity:recent';
 
+const ATOMIC_PUBLISH_LUA = `
+local seq = redis.call('INCR', KEYS[1])
+local entryId = tostring(seq) .. '-0'
+redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[1], entryId, 'id', tostring(seq), 'event', ARGV[2], 'data', ARGV[3], 'timestamp', ARGV[4])
+local msg = cjson.encode({
+  id = seq,
+  event = ARGV[2],
+  data = cjson.decode(ARGV[3]),
+  timestamp = ARGV[4]
+})
+redis.call('PUBLISH', KEYS[3], msg)
+return seq
+`;
+
 /**
  * Shared publisher helper:
- * 1. Monotonically increments numeric ID sequence
+ * 1. Monotonically increments numeric ID sequence and performs capped XADD and Pub/Sub atomically via Lua script
  * 2. Capped XADD to bounded Redis stream (MAXLEN ~ sseMaxLen, default 500)
  * 3. Redis Pub/Sub broadcast for multi-instance API fan-out
  * 4. Bounded recent activity recording
@@ -42,42 +56,29 @@ export async function publishRealtimeEvent(params: {
   data: any;
 }): Promise<RealtimeMessage> {
   const redis = getPublisherRedis();
-  const seq = await redis.incr(REALTIME_SEQ_KEY);
   const now = new Date().toISOString();
   const maxLen = config.redisMemory?.sseMaxLen || 500;
+  const payloadJson = JSON.stringify(params.data || {});
+
+  // Atomically INCR, capped XADD, and PUBLISH via Lua script to prevent out-of-order stream ID races
+  const seq = (await redis.eval(
+    ATOMIC_PUBLISH_LUA,
+    3,
+    REALTIME_SEQ_KEY,
+    REALTIME_STREAM_KEY,
+    REALTIME_PUBSUB_CHANNEL,
+    maxLen,
+    params.event,
+    payloadJson,
+    now
+  )) as number;
 
   const msg: RealtimeMessage = {
-    id: seq,
+    id: Number(seq),
     event: params.event,
     data: params.data,
     timestamp: now
   };
-
-  const entryId = `${seq}-0`;
-  const payloadJson = JSON.stringify(params.data);
-
-  // 1. Capped XADD to Redis Stream
-  await redis.xadd(
-    REALTIME_STREAM_KEY,
-    'MAXLEN',
-    '~',
-    maxLen,
-    entryId,
-    'id',
-    String(seq),
-    'event',
-    params.event,
-    'data',
-    payloadJson,
-    'timestamp',
-    now
-  );
-
-  // 2. Publish to Redis Pub/Sub notification for every API instance
-  await redis.publish(
-    REALTIME_PUBSUB_CHANNEL,
-    JSON.stringify(msg)
-  );
 
   // 3. Record in bounded recent activity list if relevant activity event
   if (

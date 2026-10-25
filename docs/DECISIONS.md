@@ -190,8 +190,9 @@ Operational monitoring of large device fleets requires real-time push updates fo
 
 3. **Shared Publisher Helper & Multi-Instance Fan-Out**:
    - Centralized `publishRealtimeEvent()` in `@fleet/config` used by both API routes and background workers:
-     - Atomic `INCR` for sequential ID.
-     - Capped `XADD` to `fleet:stream:events`.
+     - **Atomic Lua Script**: Executes `INCR`, capped `XADD`, and `PUBLISH` within a single atomic Lua script (`EVAL`) in Redis. This completely eliminates race conditions where concurrent calls between API and worker processes could interleave between `INCR` and `XADD` and trigger Redis `ERR The ID specified in XADD is equal or smaller than the target stream top item` rejections.
+     - Monotonically incrementing ID sequence (`${seq}-0`).
+     - Capped `XADD` to `fleet:stream:events` (`MAXLEN ~ 500`).
      - Redis Pub/Sub broadcast on `fleet:pubsub:sse`.
      - Bounded recent activity push via `LPUSH` / `LTRIM 0 99` to `fleet:activity:recent`.
    - Every API instance subscribes to `fleet:pubsub:sse` on startup, broadcasting incoming pub/sub messages to its locally connected SSE clients. This decouples worker processing from specific API web nodes.
