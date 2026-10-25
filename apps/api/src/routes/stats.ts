@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { createRedisClient } from '@fleet/config';
-import { Device, Event, Incident, Notification, RejectedEvent, calculateDeviceStatus } from '@fleet/database';
+import { Device, Event, Incident, Notification, RejectedEvent, calculateDeviceStatus, computeDeviceFleetCounts } from '@fleet/database';
 import { getTelemetryQueue } from '../queue/telemetryQueue.js';
 import { sseManager } from '../realtime/sseManager.js';
 import { dashboardAuth } from '../middleware/dashboardAuth.js';
@@ -54,17 +54,8 @@ statsRouter.get('/', dashboardAuth, async (req: Request, res: Response) => {
       ])
     ]);
 
-    // Compute devices by status
-    const devicesByStatus: Record<string, number> = {
-      online: 0,
-      stale: 0,
-      offline: 0,
-      registered: 0
-    };
-    for (const dev of devices) {
-      const status = calculateDeviceStatus(dev.lastSeenAt);
-      devicesByStatus[status] = (devicesByStatus[status] || 0) + 1;
-    }
+    // Compute devices by status using shared function
+    const devicesByStatus = computeDeviceFleetCounts(devices);
 
     // Incidents by severity
     const incidentsBySeverity: Record<string, number> = {

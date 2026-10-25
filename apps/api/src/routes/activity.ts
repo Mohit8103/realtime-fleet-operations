@@ -13,6 +13,40 @@ export interface ActivityItem {
   data: Record<string, unknown>;
 }
 
+function dedupeAndFormatActivity(items: ActivityItem[], maxLimit: number): ActivityItem[] {
+  const sorted = [...items].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+  const result: ActivityItem[] = [];
+  const createdIncidentIds = new Set<string>();
+  const seenIncidentKeys = new Set<string>();
+
+  for (const item of sorted) {
+    const incId = (item.data?.incidentId || (item.data as any)?._id) as string | undefined;
+
+    if (incId) {
+      if (item.type === 'incident_created') {
+        if (createdIncidentIds.has(incId)) {
+          // Already have 'INCIDENT CREATED' for this incidentId; collapse
+          continue;
+        }
+        createdIncidentIds.add(incId);
+      } else if (item.type === 'incident_updated' || item.type === 'incident_occurrence') {
+        const occ = (item.data as any)?.occurrenceCount || (item.data as any)?.action || '';
+        const occKey = `${incId}:${item.type}:${occ}`;
+        if (seenIncidentKeys.has(occKey)) {
+          continue;
+        }
+        seenIncidentKeys.add(occKey);
+      }
+    }
+
+    result.push(item);
+    if (result.length >= maxLimit) break;
+  }
+
+  return result;
+}
+
 // GET /v1/activity - Recent activity feed (bounded)
 activityRouter.get('/', dashboardAuth, async (req: Request, res: Response) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 50, 1), 100);
@@ -93,18 +127,17 @@ activityRouter.get('/', dashboardAuth, async (req: Request, res: Response) => {
         }
       }
 
-      combined.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-      const finalActivity = combined.slice(0, limit);
+      const finalActivity = dedupeAndFormatActivity(combined, limit);
       return res.status(200).json({
         count: finalActivity.length,
         activity: finalActivity
       });
     }
 
+    const finalActivity = dedupeAndFormatActivity(redisActivity, limit);
     return res.status(200).json({
-      count: redisActivity.length,
-      activity: redisActivity
+      count: finalActivity.length,
+      activity: finalActivity
     });
   } catch (err: any) {
     req.log?.error({ err: err.message }, 'Failed to query activity');

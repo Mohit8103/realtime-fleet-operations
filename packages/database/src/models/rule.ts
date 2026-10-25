@@ -41,7 +41,7 @@ export interface IRule extends Document {
 
 const ruleSchema = new Schema<IRule>(
   {
-    name: { type: String, required: true, trim: true },
+    name: { type: String, required: true, trim: true, unique: true, index: true },
     type: {
       type: String,
       enum: ['threshold', 'type_match', 'no_report'],

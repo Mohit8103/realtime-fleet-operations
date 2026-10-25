@@ -22,6 +22,7 @@
     "build": "npm run build --workspaces --if-present",
     "prepare": "npm run build",
     "seed": "tsx scripts/seed.ts",
+    "reset-data": "tsx scripts/reset-data.ts",
     "test": "tsx scripts/run-all-tests.ts",
     "test:unit": "vitest run",
     "test:watch": "vitest",

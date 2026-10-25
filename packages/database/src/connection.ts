@@ -95,7 +95,7 @@ export async function disconnectMongo(): Promise<void> {
  * Compute device operational status dynamically from lastSeenAt
  */
 export function calculateDeviceStatus(
-  lastSeenAt?: Date | null,
+  lastSeenAt?: Date | string | null,
   staleThresholdSeconds = config.fleet.staleDeviceThresholdSeconds,
   offlineThresholdSeconds = config.fleet.staleDeviceThresholdSeconds * 3
 ): DeviceStatus {
@@ -110,6 +110,25 @@ export function calculateDeviceStatus(
     return 'stale';
   }
   return 'online';
+}
+
+/**
+ * Compute device fleet counts for all operational statuses
+ */
+export function computeDeviceFleetCounts(
+  devices: Array<{ lastSeenAt?: Date | string | null }>
+): Record<DeviceStatus, number> {
+  const counts: Record<DeviceStatus, number> = {
+    online: 0,
+    stale: 0,
+    offline: 0,
+    registered: 0
+  };
+  for (const dev of devices) {
+    const status = calculateDeviceStatus(dev.lastSeenAt);
+    counts[status] = (counts[status] || 0) + 1;
+  }
+  return counts;
 }
 
 export { mongoose };

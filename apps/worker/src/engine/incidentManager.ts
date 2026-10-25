@@ -86,12 +86,33 @@ export async function recordIncidentMatch(params: {
     { new: true }
   );
 
+// Throttle map for incident occurrence updates: at most one incident_updated per incident per 5 seconds
+const lastOccurrencePublishMap = new Map<string, number>();
+
+function shouldPublishOccurrenceUpdate(incidentId: string): boolean {
+  const now = Date.now();
+  const lastPub = lastOccurrencePublishMap.get(incidentId) || 0;
+  if (now - lastPub >= 5000) {
+    lastOccurrencePublishMap.set(incidentId, now);
+    if (lastOccurrencePublishMap.size > 2000) {
+      const cutoff = now - 60000;
+      for (const [id, time] of lastOccurrencePublishMap.entries()) {
+        if (time < cutoff) lastOccurrencePublishMap.delete(id);
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
   if (existing) {
     logger.info(
       { eventId, deviceId: device.deviceId, incidentId: existing.incidentId, dedupeKey },
       '🔄 Incident updated (occurrence)'
     );
-    publishRealtimeEvent({ event: 'incident_updated', data: existing.toObject() }).catch(() => {});
+    if (shouldPublishOccurrenceUpdate(existing.incidentId)) {
+      publishRealtimeEvent({ event: 'incident_updated', data: existing.toObject() }).catch(() => {});
+    }
     return { incident: existing, isCreated: false };
   }
 
@@ -203,7 +224,9 @@ export async function recordIncidentMatch(params: {
           { eventId, deviceId: device.deviceId, incidentId: raced.incidentId, dedupeKey },
           '🔄 Incident updated after concurrent race'
         );
-        publishRealtimeEvent({ event: 'incident_updated', data: raced.toObject() }).catch(() => {});
+        if (shouldPublishOccurrenceUpdate(raced.incidentId)) {
+          publishRealtimeEvent({ event: 'incident_updated', data: raced.toObject() }).catch(() => {});
+        }
         return { incident: raced, isCreated: false };
       }
     }

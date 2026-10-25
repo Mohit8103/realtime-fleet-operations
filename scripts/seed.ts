@@ -1,10 +1,15 @@
 import { connectMongo, Rule, Operator } from '@fleet/database';
 
-async function seed() {
+export async function seed() {
   console.log('🌱 Seeding database with default rules and operators...');
   await connectMongo();
 
-  // 1. Default Rules
+  // Clean up any leftover legacy rules from manual testing
+  await Rule.deleteMany({
+    name: { $in: ['Manual High Heat', 'Manual Stale', 'Overspeed Alert'] }
+  });
+
+  // Exactly two default rules: 1 threshold and 1 no_report
   const defaultRules = [
     {
       name: 'High Heat Alert',
@@ -20,7 +25,7 @@ async function seed() {
       }
     },
     {
-      name: 'Manual Stale',
+      name: 'Stale Device Alert',
       type: 'no_report',
       severity: 'medium',
       enabled: true,
@@ -29,33 +34,19 @@ async function seed() {
         seconds: 30,
         deviceFilter: { type: 'all' }
       }
-    },
-    {
-      name: 'Overspeed Alert',
-      type: 'threshold',
-      severity: 'critical',
-      enabled: true,
-      cooldownSeconds: 0,
-      conditions: {
-        metric: 'speed',
-        operator: '>',
-        value: 80,
-        deviceFilter: { type: 'all' }
-      }
     }
   ];
 
   for (const r of defaultRules) {
-    const exists = await Rule.findOne({ name: r.name });
-    if (!exists) {
-      await Rule.create(r);
-      console.log(`✅ Created default rule: ${r.name}`);
-    } else {
-      console.log(`ℹ️ Rule already exists: ${r.name}`);
-    }
+    const updated = await Rule.findOneAndUpdate(
+      { name: r.name },
+      { $set: r },
+      { upsert: true, new: true }
+    );
+    console.log(`✅ Upserted default rule: ${updated.name} (${updated._id})`);
   }
 
-  // 2. Default Operator
+  // Default Operator
   const defaultOperator = {
     operatorId: 'op-default-primary',
     name: 'Primary Fleet Operator',
@@ -63,21 +54,21 @@ async function seed() {
     locations: ['lab', 'warehouse', 'apac', 'emea', 'us-east', 'default']
   };
 
-  const opExists = await Operator.findOne({
-    $or: [{ operatorId: defaultOperator.operatorId }, { email: defaultOperator.email }]
-  });
-  if (!opExists) {
-    await Operator.create(defaultOperator);
-    console.log(`✅ Created default operator: ${defaultOperator.name}`);
-  } else {
-    console.log(`ℹ️ Default operator already exists: ${defaultOperator.name}`);
-  }
+  const op = await Operator.findOneAndUpdate(
+    { operatorId: defaultOperator.operatorId },
+    { $set: defaultOperator },
+    { upsert: true, new: true }
+  );
+  console.log(`✅ Upserted default operator: ${op.name} (${op.operatorId})`);
 
   console.log('🎉 Seeding completed successfully!');
-  process.exit(0);
 }
 
-seed().catch((err) => {
-  console.error('❌ Seeding failed:', err);
-  process.exit(1);
-});
+if (import.meta.url === `file:///${process.argv[1].replace(/\\/g, '/')}`) {
+  seed()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error('❌ Seeding failed:', err);
+      process.exit(1);
+    });
+}

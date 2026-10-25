@@ -160,6 +160,54 @@ export const App: React.FC = () => {
     }, 4500);
   };
 
+  // Shared computed status counts from devices (same computed status as GET /v1/devices)
+  const deviceStatusCounts = useMemo(() => {
+    const counts = { online: 0, stale: 0, offline: 0, registered: 0 };
+    if (devices.length > 0) {
+      for (const d of devices) {
+        const s = (d.status || 'registered').toLowerCase() as keyof typeof counts;
+        if (counts[s] !== undefined) counts[s]++;
+        else counts.registered++;
+      }
+      return counts;
+    }
+    return stats?.devicesByStatus || counts;
+  }, [devices, stats]);
+
+  // Shared active incidents count (open + acknowledged)
+  const activeIncidentsCount = useMemo(() => {
+    if (incidents.length > 0) {
+      return incidents.filter((i) => i.state === 'open' || i.state === 'acknowledged').length;
+    }
+    if (stats?.incidentsBySeverity) {
+      return Object.values(stats.incidentsBySeverity).reduce((a, b) => a + b, 0);
+    }
+    return 0;
+  }, [incidents, stats]);
+
+  // Deduplicated activity feed for rendering: INCIDENT CREATED only once per incidentId
+  const displayedActivity = useMemo(() => {
+    const list: ActivityItem[] = [];
+    const createdSeen = new Set<string>();
+    const seenActionKey = new Set<string>();
+
+    for (const item of activity) {
+      const incId = (item.data?.incidentId || (item.data as any)?._id) as string | undefined;
+      if (incId) {
+        if (item.type.includes('created')) {
+          if (createdSeen.has(incId)) continue;
+          createdSeen.add(incId);
+        } else if (item.type.includes('updated') || item.type.includes('occurrence')) {
+          const occKey = `${incId}:${item.data?.occurrenceCount || item.data?.action || ''}`;
+          if (seenActionKey.has(occKey)) continue;
+          seenActionKey.add(occKey);
+        }
+      }
+      list.push(item);
+    }
+    return list;
+  }, [activity]);
+
   // REST Snapshot Fetchers
   const fetchStats = async () => {
     try {
@@ -202,9 +250,16 @@ export const App: React.FC = () => {
     await Promise.all([fetchStats(), fetchActivity(), fetchDevices(), fetchIncidents()]);
   };
 
-  // Initial load
+  // Initial load and 10s fallback refetch
   useEffect(() => {
     refetchAllSnapshots();
+    const timer = setInterval(() => {
+      fetchStats();
+      fetchDevices();
+      fetchIncidents();
+      fetchActivity();
+    }, 10000);
+    return () => clearInterval(timer);
   }, []);
 
   // EventSource Live Realtime Connection
@@ -277,6 +332,7 @@ export const App: React.FC = () => {
             addToast('info', `Incident Created: ${incident.severity.toUpperCase()} on ${incident.deviceId}`);
             fetchStats();
             fetchActivity();
+            fetchIncidents();
           } catch {}
         });
 
@@ -296,6 +352,7 @@ export const App: React.FC = () => {
 
             fetchStats();
             fetchActivity();
+            fetchIncidents();
           } catch {}
         });
 
@@ -309,6 +366,7 @@ export const App: React.FC = () => {
               );
             }
             fetchStats();
+            fetchDevices();
           } catch {}
         });
 
@@ -514,9 +572,9 @@ export const App: React.FC = () => {
               >
                 <AlertTriangle size={16} />
                 <span>Incidents</span>
-                {stats && stats.incidentsBySeverity && (
+                {activeIncidentsCount > 0 && (
                   <span className="badge critical" style={{ padding: '0.1rem 0.35rem', fontSize: '0.65rem' }}>
-                    {(stats.incidentsBySeverity.critical || 0) + (stats.incidentsBySeverity.high || 0)}
+                    {activeIncidentsCount}
                   </span>
                 )}
               </button>
@@ -557,13 +615,13 @@ export const App: React.FC = () => {
                   {isStale && <span className="stale-tag">stale</span>}
                 </div>
                 <div className="card-value">
-                  {devices.length || (stats?.devicesByStatus ? Object.values(stats.devicesByStatus).reduce((a, b) => a + b, 0) : 0)}
+                  {devices.length || Object.values(deviceStatusCounts).reduce((a, b) => a + b, 0)}
                 </div>
                 <div className="badge-row">
-                  <span className="badge online">Online: {stats?.devicesByStatus?.online ?? 0}</span>
-                  <span className="badge stale">Stale: {stats?.devicesByStatus?.stale ?? 0}</span>
-                  <span className="badge offline">Offline: {stats?.devicesByStatus?.offline ?? 0}</span>
-                  <span className="badge registered">Reg: {stats?.devicesByStatus?.registered ?? 0}</span>
+                  <span className="badge online">Online: {deviceStatusCounts.online}</span>
+                  <span className="badge stale">Stale: {deviceStatusCounts.stale}</span>
+                  <span className="badge offline">Offline: {deviceStatusCounts.offline}</span>
+                  <span className="badge registered">Reg: {deviceStatusCounts.registered}</span>
                 </div>
               </div>
 
@@ -574,9 +632,7 @@ export const App: React.FC = () => {
                   {isStale && <span className="stale-tag">stale</span>}
                 </div>
                 <div className="card-value">
-                  {stats?.incidentsBySeverity
-                    ? Object.values(stats.incidentsBySeverity).reduce((a, b) => a + b, 0)
-                    : 0}
+                  {activeIncidentsCount}
                 </div>
                 <div className="badge-row">
                   <span className="badge critical">Crit: {stats?.incidentsBySeverity?.critical ?? 0}</span>
@@ -628,12 +684,12 @@ export const App: React.FC = () => {
               </div>
 
               <div style={{ maxHeight: '420px', overflowY: 'auto' }}>
-                {activity.length === 0 ? (
+                {displayedActivity.length === 0 ? (
                   <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '2rem' }}>
                     No recent activity recorded yet.
                   </div>
                 ) : (
-                  activity.map((item, idx) => (
+                  displayedActivity.map((item, idx) => (
                     <div
                       key={item.id || idx}
                       style={{
@@ -659,7 +715,11 @@ export const App: React.FC = () => {
                       <div style={{ flex: 1 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <span style={{ fontWeight: 600, fontSize: '0.85rem' }}>
-                            {item.type.replace(/_/g, ' ').toUpperCase()}
+                            {item.type.includes('created')
+                              ? 'INCIDENT CREATED'
+                              : item.type.includes('updated') || item.type.includes('occurrence')
+                              ? `INCIDENT UPDATED ${item.data?.occurrenceCount ? `(occurrence ${item.data.occurrenceCount})` : ''}`
+                              : item.type.replace(/_/g, ' ').toUpperCase()}
                           </span>
                           <span className="mono" style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
                             {new Date(item.timestamp).toLocaleTimeString()}

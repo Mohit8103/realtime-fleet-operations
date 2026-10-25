@@ -12,10 +12,26 @@ async function api(path, body, key) {
   return { status: r.status, json: await r.json().catch(() => null) };
 }
 
+async function getOrPostRule(rulePayload) {
+  const listRes = await fetch(BASE + '/v1/rules');
+  if (listRes.ok) {
+    const listJson = await listRes.json().catch(() => ({}));
+    const found = listJson.rules?.find((r) => r.name === rulePayload.name);
+    if (found) {
+      return { status: 200, json: { status: 'reused', rule: found } };
+    }
+  }
+  const postRes = await api('/v1/rules', rulePayload);
+  if (postRes.status === 409 && postRes.json?.rule) {
+    return { status: 200, json: { status: 'reused', rule: postRes.json.rule } };
+  }
+  return postRes;
+}
+
 if (cmd === 'setup') {
   const deviceId = 'manual-' + Date.now();
   const dev = await api('/v1/devices', { deviceId, name: deviceId, location: 'lab' });
-  const r1 = await api('/v1/rules', {
+  const r1 = await getOrPostRule({
     name: 'Manual High Heat',
     type: 'threshold',
     metric: 'temperature',
@@ -25,7 +41,7 @@ if (cmd === 'setup') {
     enabled: true,
     cooldownSeconds: 0
   });
-  const r2 = await api('/v1/rules', {
+  const r2 = await getOrPostRule({
     name: 'Manual Stale',
     type: 'no_report',
     durationSeconds: 30,

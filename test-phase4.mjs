@@ -145,6 +145,11 @@ async function runPhase4Tests() {
   console.log('1a. Device Registered:', reg1.status, dev1Id);
   const key1 = reg1.json?.apiKey;
 
+  // Clean up any previous test rules to keep tests isolated and deterministic
+  await Rule.deleteMany({
+    name: { $in: ['Phase 4 Overspeed Alert', 'Burst Overspeed Alert'] }
+  });
+
   // Create alert rule: speed > 100
   const ruleRes = await call('/v1/rules', {
     method: 'POST',

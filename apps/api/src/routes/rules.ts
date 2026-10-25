@@ -36,13 +36,32 @@ rulesRouter.post('/', async (req: Request, res: Response) => {
     });
   }
 
+  const { name } = parseResult.data;
+
   try {
+    const existing = await Rule.findOne({ name });
+    if (existing) {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: `Rule with name "${name}" already exists`,
+        rule: existing
+      });
+    }
+
     const rule = await Rule.create(parseResult.data);
     return res.status(201).json({
       status: 'created',
       rule
     });
   } catch (err: any) {
+    if (err.code === 11000 || String(err.message).includes('E11000')) {
+      const existing = await Rule.findOne({ name });
+      return res.status(409).json({
+        error: 'Conflict',
+        message: `Rule with name "${name}" already exists`,
+        rule: existing || undefined
+      });
+    }
     req.log?.error({ err: err.message }, 'Failed to create rule');
     return res.status(500).json({ error: 'Failed to create rule', message: err.message });
   }
