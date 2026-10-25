@@ -56,7 +56,7 @@ if (cmd === 'setup') {
   console.log('Registered deviceId:', deviceId);
 } else if (cmd === 'send') {
   if (!fs.existsSync(STATE)) {
-    console.error(`State file ${STATE} not found. Run 'node manual-check.mjs setup' first.`);
+    console.error(`State file ${STATE} not found. Run 'node scripts/manual-check.mjs setup' first.`);
     process.exit(1);
   }
   const s = JSON.parse(fs.readFileSync(STATE));
@@ -81,5 +81,5 @@ if (cmd === 'setup') {
   fs.writeFileSync(STATE, JSON.stringify(s));
   console.log('sent', n, 'events, statuses:', out);
 } else {
-  console.log("Usage: node manual-check.mjs setup | send [count]");
+  console.log("Usage: node scripts/manual-check.mjs setup | send [count]");
 }

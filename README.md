@@ -119,7 +119,7 @@ npm run demo:chaos
 2. **20s – 110s (Offline Window)**:
    - Devices stop transmitting over HTTP and buffer events in local memory and disk (`.simulator-buffer.json`).
    - The simulator console shows `state: offline` and `buffered` climbing.
-   - After ~60 seconds of inactivity, the worker's stale detector triggers and flags devices as `stale`, opening `Manual Stale` incidents on the dashboard.
+   - After ~60 seconds of inactivity, the worker's stale detector triggers and flags devices as `stale`, opening `Stale Device Alert` incidents on the dashboard.
 3. **110s+ (Replay & Recovery)**:
    - Simulator reconnects and displays `state: replaying`.
    - Buffered events are drained in sequential batches of 50 via `POST /v1/events/batch` with `replayed: true`.
@@ -142,20 +142,20 @@ npm test
 > - The test suite takes **roughly 5 minutes** to execute (`~258 seconds`) because it exercises real-world network reconnects, timeouts, rate limits, 500-event bursts, concurrency stress tests, and SSE disconnect cycles.
 > - The test suite **writes test data into the database** (synthetic devices, telemetry events, incidents, notifications, and rule evaluations).
 
-### Database Cleanup After Testing
-Because `npm test` writes test data into the database, clean up the test collections afterwards to return to a clean state for demos:
+### Database & Environment Reset After Testing
+Because `npm test` writes test data into the database, reset your environment to a clean state for demos using the one-command reset script:
 
-1. **Drop the test collections** (in MongoDB Atlas or via the cleanup script):
-   - Drop `events`, `incidents`, `notifications`, `rule_evaluations`, `rejected_events`, and `devices`. Keep `rules` and `operators`.
-   - *Via helper script*:
-     ```bash
-     npx tsx scripts/cleanup.ts
-     ```
-2. **Re-seed default operational rules and operators**:
-   ```bash
-   npm run seed
-   ```
-3. Restart `api` and `worker` afterwards if they were running during collection drops.
+```bash
+npm run reset-data
+```
+
+This single command:
+1. Clears all collections (`events`, `incidents`, `notifications`, `rule_evaluations`, `rejected_events`, `devices`, and `rules`).
+2. Flushes the Redis telemetry queue, real-time event stream (`fleet:events`), activity feed, and counters.
+3. Re-creates the unique indexes (partial unique index on `incidents.dedupeKey`, `notifications.incidentId`, and unique index on `rules.name`).
+4. Re-seeds default operational rules (`High Heat Alert` and `Stale Device Alert`) and the default operator.
+5. Leaves your environment completely clean for the live dashboard and demos.
+*(Note: restart `api` and `worker` if desired after running `reset-data` to clear in-memory rate-limit trackers).*
 
 ### Individual Test Suites
 ```bash
