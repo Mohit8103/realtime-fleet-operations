@@ -136,20 +136,25 @@ npm test
 ```
 
 > [!IMPORTANT]
-> **Prerequisites for Running Tests**:
-> - `npm test` runs against an **already-running local stack** (`api` on `:3000`, `worker` on `:3001`, and both MongoDB and Redis reachable).
-> - The consolidated test run takes **roughly 5 minutes** (`~258 seconds`) because it exercises real-world timeouts, rate limits, 500-event bursts, concurrency stress tests, and SSE disconnect cycles.
-> - The test run writes synthetic devices, incidents, and events into the database.
+> **Prerequisites & Test Execution**:
+> - `npm test` runs against an **already-running local stack** (`api`, `worker`, and both MongoDB and Redis databases must be up).
+> - The test suite takes **roughly 5 minutes** to execute (`~258 seconds`) because it exercises real-world network reconnects, timeouts, rate limits, 500-event bursts, concurrency stress tests, and SSE disconnect cycles.
+> - The test suite **writes test data into the database** (synthetic devices, telemetry events, incidents, notifications, and rule evaluations).
 
 ### Database Cleanup After Testing
-To reset your database to a pristine demo state after running tests:
-```bash
-# 1. Drop test collections via helper script
-npx tsx scripts/cleanup.ts
+Because `npm test` writes test data into the database, clean up the test collections afterwards to return to a clean state for demos:
 
-# 2. Re-seed default operational rules and operators
-npm run seed
-```
+1. **Drop the test collections** (in MongoDB Atlas or via the cleanup script):
+   - Drop `events`, `incidents`, `notifications`, `rule_evaluations`, `rejected_events`, and `devices`. Keep `rules` and `operators`.
+   - *Via helper script*:
+     ```bash
+     npx tsx scripts/cleanup.ts
+     ```
+2. **Re-seed default operational rules and operators**:
+   ```bash
+   npm run seed
+   ```
+3. Restart `api` and `worker` afterwards if they were running during collection drops.
 
 ### Individual Test Suites
 ```bash
