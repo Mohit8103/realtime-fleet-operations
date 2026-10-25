@@ -1,5 +1,5 @@
 import { Notification, type INotification } from '@fleet/database';
-import { config } from '@fleet/config';
+import { config, recordNotificationFailureActivity } from '@fleet/config';
 import { createLogger } from '@fleet/logger';
 
 const logger = createLogger({ service: 'notification-dispatcher' });
@@ -121,6 +121,19 @@ export async function processNotification(notification: INotification): Promise<
   notification.attempts = attempts;
   notification.lockedUntil = null;
   notification.lastError = result.error || 'Unknown dispatch error';
+
+  // Record failure in recent activity feed
+  try {
+    await recordNotificationFailureActivity({
+      notificationId: notification.notificationId,
+      incidentId: notification.incidentId,
+      operatorId: notification.operatorId,
+      error: notification.lastError,
+      attempts
+    });
+  } catch {
+    // Non-fatal activity logging
+  }
 
   if (attempts >= notification.maxAttempts) {
     notification.status = 'dead';

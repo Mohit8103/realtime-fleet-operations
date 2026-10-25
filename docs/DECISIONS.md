@@ -161,4 +161,68 @@ In high-throughput IoT fleet operations, hundreds of over-threshold telemetry ev
 - **Cons**:
   - Partial indexes require MongoDB query patterns to explicitly match the filter expression (`state in ['open', 'acknowledged']`) to leverage the unique constraint.
 
+---
+
+## ADR-009: Realtime Server-Sent Events (SSE), Redis Stream Bounded Backlog, Multi-Instance Fan-Out, and Dashboard Status APIs
+
+### Context
+Operational monitoring of large device fleets requires real-time push updates for incoming telemetry, incident creation/lifecycle changes, and device health transitions. WebSockets introduce bidirectional complexity and stateful connection overhead; Server-Sent Events (SSE) offer a lightweight, standard HTTP push protocol supported natively by browsers. However, production fleet monitoring faces several constraints:
+1. Native browser `EventSource` cannot send custom headers such as `x-api-key`.
+2. Temporary client disconnections must recover missed messages without data loss.
+3. Redis memory is tightly bounded (30 MB limit on free-tier Redis), necessitating strict log capping.
+4. Telemetry bursts (e.g., 500 events/second) can saturate browser clients if high-frequency ingest events are not rate-limited, but critical incident and device status alerts must NEVER be dropped.
+5. Multiple API instances must fan out messages published by background workers to all connected clients.
+
+### Decision
+1. **Server-Sent Events (`GET /v1/stream`)**:
+   - Pushes four core real-time event types: `event_ingested`, `incident_created`, `incident_updated`, and `device_status_changed`.
+   - Each message carries a monotonically incrementing numeric ID (`id: <number>`).
+   - Supports the standard `Last-Event-ID` request header for seamless reconnection.
+   - Sets standard SSE headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache, no-transform`, `Connection: keep-alive`, and `X-Accel-Buffering: no` (disabling proxy buffering).
+   - Emits an SSE comment heartbeat every 15 seconds (`: heartbeat\n\n`) to prevent intermediate proxy timeouts.
+   - Cleans up client listeners on socket disconnect to guarantee zero memory or subscriber leaks.
+
+2. **Bounded Redis Stream Log & Replay**:
+   - Uses a Redis Stream (`fleet:stream:events`) capped via `XADD MAXLEN ~ 500` (configurable via `sseMaxLen` in `@fleet/config`).
+   - Entries are indexed as `${seq}-0` where `seq` is generated atomically via `INCR fleet:stream:id_seq`.
+   - On reconnect with `Last-Event-ID`, the server queries `XRANGE (${lastId}-0 +` to stream only missed messages.
+   - If the requested `Last-Event-ID` is older than the oldest retained stream entry (log truncated), the server immediately emits a `resync_required` event payload, prompting the client to refetch full snapshot state.
+
+3. **Shared Publisher Helper & Multi-Instance Fan-Out**:
+   - Centralized `publishRealtimeEvent()` in `@fleet/config` used by both API routes and background workers:
+     - Atomic `INCR` for sequential ID.
+     - Capped `XADD` to `fleet:stream:events`.
+     - Redis Pub/Sub broadcast on `fleet:pubsub:sse`.
+     - Bounded recent activity push via `LPUSH` / `LTRIM 0 99` to `fleet:activity:recent`.
+   - Every API instance subscribes to `fleet:pubsub:sse` on startup, broadcasting incoming pub/sub messages to its locally connected SSE clients. This decouples worker processing from specific API web nodes.
+
+4. **Stream Throttling & Coalescing**:
+   - High-rate `event_ingested` messages are coalesced to at most 10 per second per client using a 1-second sliding bucket window. Excess ingested messages in a window are dropped or replaced with latest state.
+   - Critical messages (`incident_created`, `incident_updated`, `device_status_changed`, `resync_required`) are ALWAYS delivered immediately, bypassing rate limiters to guarantee zero dropped alerts under load.
+
+5. **Dashboard Token Authentication & Status Endpoints**:
+   - Because native `EventSource` cannot transmit custom headers, `/v1/stream` and dashboard read endpoints do not require `x-api-key`.
+   - Implemented `dashboardAuth` middleware accepting an optional `DASHBOARD_TOKEN` environment variable passed via `?token=` query parameter or `Authorization: Bearer <token>` (off by default for seamless local development).
+   - *Note on Production Deployments*: Production environments would integrate proper operator authentication (e.g., HTTP-only session cookies, OAuth2, or JWT tokens).
+   - Supporting status endpoints:
+     - `GET /v1/devices`: Lists devices with dynamically computed status (`online`, `stale`, `offline`), `location`, `lastSeenAt`, `lastSeq`, and event counts, with status filtering.
+     - `GET /v1/devices/:id/events`: Paginated recent events for a specific device.
+     - `GET /v1/events`: Paginated recent telemetry events, filterable by `type` and `deviceId`.
+     - `GET /v1/stats`: Operational dashboard metrics (events per minute, devices by status, incidents by severity, BullMQ queue depth, failed jobs, Redis duplicate/rejection counters, outbox notifications, active SSE clients).
+     - `GET /v1/activity`: Recent activity feed combining real-time memory buffer and database audit history.
+
+6. **Connection Pool Hygiene**:
+   - Implemented client connection pooling in `@fleet/config`: standard Redis operations (caching, deduplication, stats, publishing) share a single singleton Redis client per Node.js process (`getSharedRedisClient()`), while blocking consumers (BullMQ workers and SSE pub/sub subscribers) utilize dedicated clients (`createDedicatedRedisClient()`). This keeps total Redis connections safely within cloud provider limits (e.g. Upstash 20-connection cap).
+
+### Consequences & Trade-offs
+- **Pros**:
+  - Full real-time dashboard responsiveness with zero WebSocket protocol overhead.
+  - Fault-tolerant reconnects: network glitches seamlessly replay missed events from Redis Stream.
+  - Safe memory bounds on free-tier Redis instances via `MAXLEN ~ 500`.
+  - Zero dropped alerts for critical incidents during high-rate telemetry floods.
+  - Multi-instance API readiness via Redis Pub/Sub broadcast.
+- **Cons**:
+  - SSE is unidirectional (server-to-client); dashboard actions (acknowledging, resolving incidents) still require standard HTTP REST POST requests.
+
+
 

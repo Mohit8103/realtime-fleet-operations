@@ -1,5 +1,5 @@
 import { Worker, type Job } from 'bullmq';
-import { createRedisClient, config } from '@fleet/config';
+import { createRedisClient, createDedicatedRedisClient, config, publishRealtimeEvent } from '@fleet/config';
 import { Event, Device } from '@fleet/database';
 import { createLogger } from '@fleet/logger';
 import { processEventRules } from '../engine/rulesEngine.js';
@@ -8,8 +8,6 @@ import { autoResolveStaleIncidents } from '../engine/incidentManager.js';
 const logger = createLogger({ service: 'telemetry-consumer' });
 
 export function setupTelemetryConsumer() {
-  const redis = createRedisClient();
-
   const worker = new Worker(
     'telemetry-queue',
     async (job: Job) => {
@@ -63,10 +61,23 @@ export function setupTelemetryConsumer() {
         const eventTimestamp = new Date(data.timestamp).getTime();
 
         if (data.seq >= currentLastSeq || eventTimestamp >= currentLastSeen) {
+          const oldStatus = deviceDoc.status;
           deviceDoc.lastSeenAt = new Date(data.timestamp);
           deviceDoc.lastSeq = Math.max(currentLastSeq, data.seq);
           deviceDoc.status = 'online';
           await deviceDoc.save();
+
+          if (oldStatus !== 'online') {
+            publishRealtimeEvent({
+              event: 'device_status_changed',
+              data: {
+                deviceId: deviceDoc.deviceId,
+                oldStatus,
+                newStatus: 'online',
+                timestamp: new Date().toISOString()
+              }
+            }).catch(() => {});
+          }
         }
 
         // Auto-resolve open stale incidents on fresh non-replayed events
@@ -85,7 +96,7 @@ export function setupTelemetryConsumer() {
       logger.info({ eventId, deviceId: data.deviceId }, '✅ Telemetry event processed successfully');
     },
     {
-      connection: redis,
+      connection: createDedicatedRedisClient(),
       concurrency: config.worker.concurrency,
       stalledInterval: 30000
     }

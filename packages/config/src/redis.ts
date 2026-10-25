@@ -1,7 +1,9 @@
 import { Redis, type RedisOptions } from 'ioredis';
 import { config } from './index.js';
 
-export function createRedisClient(customOptions?: RedisOptions): Redis {
+let sharedClient: Redis | null = null;
+
+export function createDedicatedRedisClient(customOptions?: RedisOptions): Redis {
   const baseOptions: RedisOptions = {
     maxRetriesPerRequest: null, // Required by BullMQ
     connectTimeout: 4000,
@@ -29,6 +31,20 @@ export function createRedisClient(customOptions?: RedisOptions): Redis {
   });
 
   return client;
+}
+
+export function getSharedRedisClient(): Redis {
+  if (!sharedClient || sharedClient.status === 'end') {
+    sharedClient = createDedicatedRedisClient();
+  }
+  return sharedClient;
+}
+
+export function createRedisClient(customOptions?: RedisOptions): Redis {
+  if (customOptions && Object.keys(customOptions).length > 0) {
+    return createDedicatedRedisClient(customOptions);
+  }
+  return getSharedRedisClient();
 }
 
 export async function verifyRedisConnection(client?: Redis, timeoutMs = 4000): Promise<Redis> {

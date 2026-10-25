@@ -12,6 +12,9 @@ import { incidentsRouter } from './routes/incidents.js';
 import { operatorsRouter } from './routes/operators.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { mockWebhookRouter, mockWebhookAdminRouter } from './routes/mockWebhook.js';
+import { streamRouter } from './routes/stream.js';
+import { statsRouter } from './routes/stats.js';
+import { activityRouter } from './routes/activity.js';
 
 export const logger = createLogger({ service: 'api' });
 
@@ -86,6 +89,16 @@ export function createApp(): Express {
 
   app.use('/v1/admin', adminRouter);
   app.use('/api/v1/admin', adminRouter);
+
+  // Realtime & Supporting Status APIs
+  app.use('/v1/stream', streamRouter);
+  app.use('/api/v1/stream', streamRouter);
+
+  app.use('/v1/stats', statsRouter);
+  app.use('/api/v1/stats', statsRouter);
+
+  app.use('/v1/activity', activityRouter);
+  app.use('/api/v1/activity', activityRouter);
 
   // Fallback 404 handler
   app.use((req: Request, res: Response) => {

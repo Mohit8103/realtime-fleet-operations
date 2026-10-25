@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { Incident, Event, RuleEvaluation } from '@fleet/database';
+import { publishRealtimeEvent } from '@fleet/config';
 
 export const incidentsRouter = Router();
 
@@ -116,6 +117,8 @@ incidentsRouter.post('/:id/acknowledge', async (req: Request, res: Response) => 
 
     await incident.save();
 
+    publishRealtimeEvent({ event: 'incident_updated', data: incident.toObject() }).catch(() => {});
+
     return res.status(200).json({
       status: 'acknowledged',
       incident
@@ -160,6 +163,8 @@ incidentsRouter.post('/:id/resolve', async (req: Request, res: Response) => {
     });
 
     await incident.save();
+
+    publishRealtimeEvent({ event: 'incident_updated', data: incident.toObject() }).catch(() => {});
 
     return res.status(200).json({
       status: 'resolved',

@@ -60,7 +60,10 @@ const envSchema = z.object({
   // Incident Management & Notifications
   AUTO_RESOLVE_STALE: z.coerce.boolean().default(true),
   MAX_NOTIFY_ATTEMPTS: z.coerce.number().default(5),
-  MOCK_WEBHOOK_URL: z.string().default('http://localhost:3000/mock/webhook')
+  MOCK_WEBHOOK_URL: z.string().default('http://localhost:3000/mock/webhook'),
+
+  // Dashboard Authentication (optional, for browser EventSource and status APIs)
+  DASHBOARD_TOKEN: z.string().optional()
 });
 
 export type RawEnv = z.infer<typeof envSchema>;
@@ -120,6 +123,7 @@ function loadConfig() {
       maxAttempts: raw.MAX_NOTIFY_ATTEMPTS,
       mockWebhookUrl: raw.MOCK_WEBHOOK_URL
     },
+    dashboardToken: raw.DASHBOARD_TOKEN || undefined,
     maxQueueDepth: raw.MAX_QUEUE_DEPTH,
     redisMemory: {
       sseMaxLen: 500,
@@ -134,4 +138,5 @@ function loadConfig() {
 export const config = loadConfig();
 export type Config = ReturnType<typeof loadConfig>;
 export * from './redis.js';
+export * from './realtime.js';
 

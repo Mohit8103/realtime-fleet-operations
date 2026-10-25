@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { Queue, Worker } from 'bullmq';
-import { createRedisClient } from '@fleet/config';
+import { createRedisClient, createDedicatedRedisClient, publishRealtimeEvent } from '@fleet/config';
 import {
   Device,
   Rule,
@@ -44,7 +44,7 @@ export function setupStaleDeviceDetector() {
       }
     },
     {
-      connection: createRedisClient(),
+      connection: createDedicatedRedisClient(),
       concurrency: 1
     }
   );
@@ -66,10 +66,20 @@ export async function executeStaleScan(): Promise<void> {
     // 1. Dynamically compute device status from lastSeenAt
     const currentStatus = calculateDeviceStatus(device.lastSeenAt);
     if (device.status !== currentStatus) {
+      const oldStatus = device.status;
       await Device.updateOne(
         { _id: device._id },
         { $set: { status: currentStatus } }
       );
+      publishRealtimeEvent({
+        event: 'device_status_changed',
+        data: {
+          deviceId: device.deviceId,
+          oldStatus,
+          newStatus: currentStatus,
+          timestamp: new Date().toISOString()
+        }
+      }).catch(() => {});
     }
 
     if (!staleRules.length || !device.lastSeenAt) continue;

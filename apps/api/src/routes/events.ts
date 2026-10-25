@@ -1,6 +1,7 @@
-import { Router, type Request, type Response } from 'express';
-import { createRedisClient } from '@fleet/config';
+import { Router, type Request, type Response, type NextFunction } from 'express';
+import { createRedisClient, publishRealtimeEvent } from '@fleet/config';
 import { requireApiKey } from '../middleware/auth.js';
+import { dashboardAuth } from '../middleware/dashboardAuth.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
 import { checkQueueBackpressure } from '../middleware/queueBackpressure.js';
 import { telemetryEventSchema, batchEventsSchema } from '../schemas/eventSchema.js';
@@ -10,19 +11,64 @@ import { Event, Device, RejectedEvent, RuleEvaluation } from '@fleet/database';
 export const eventsRouter = Router();
 const redis = createRedisClient();
 
-// Authenticate all event routes
-eventsRouter.use(requireApiKey);
+// GET /v1/events - Recent events (paginated, filter by type and device)
+eventsRouter.get('/', dashboardAuth, async (req: Request, res: Response) => {
+  const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 50, 1), 100);
+  const page = parseInt(req.query.page as string, 10);
+  const offset = req.query.offset !== undefined
+    ? parseInt(req.query.offset as string, 10) || 0
+    : page ? Math.max((page - 1) * limit, 0) : 0;
+
+  try {
+    const filter: Record<string, unknown> = {};
+
+    if (req.query.type) {
+      filter.type = String(req.query.type);
+    }
+    const deviceId = req.query.deviceId || req.query.device;
+    if (deviceId) {
+      filter.deviceId = String(deviceId);
+    }
+
+    const [events, total] = await Promise.all([
+      Event.find(filter)
+        .sort({ timestamp: -1 })
+        .skip(offset)
+        .limit(limit)
+        .lean(),
+      Event.countDocuments(filter)
+    ]);
+
+    return res.status(200).json({
+      count: events.length,
+      total,
+      limit,
+      offset,
+      events
+    });
+  } catch (err: any) {
+    req.log?.error({ err: err.message }, 'Failed to list events');
+    return res.status(500).json({
+      error: 'Failed to list events',
+      message: err.message
+    });
+  }
+});
 
 // Single event ingestion: POST /v1/events
 // Uses per-device rate limiting and queue backpressure
 eventsRouter.post(
   '/',
+  requireApiKey,
   createRateLimiter({ max: 100, windowSeconds: 5, keyPrefix: 'ratelimit:single' }),
   checkQueueBackpressure,
   async (req: Request, res: Response) => {
     const parseResult = telemetryEventSchema.safeParse(req.body);
 
     if (!parseResult.success) {
+      // Increment Redis rejected counter
+      redis.incr('stats:rejected_count').catch(() => {});
+
       // Store rejected event in rejected_events collection
       try {
         await RejectedEvent.create({
@@ -87,7 +133,15 @@ eventsRouter.post(
         }
       }
 
-      // 4. Enqueue to BullMQ after insert
+      // 4. Publish event_ingested to realtime SSE stream
+      publishRealtimeEvent({
+        event: 'event_ingested',
+        data: eventDoc.toObject()
+      }).catch((streamErr: any) => {
+        req.log?.warn({ err: streamErr.message }, 'Failed to publish event_ingested stream');
+      });
+
+      // 5. Enqueue to BullMQ after insert
       try {
         const queue = getTelemetryQueue();
         await queue.add('telemetry-event', eventDoc.toObject(), {
@@ -109,6 +163,8 @@ eventsRouter.post(
     } catch (err: any) {
       // Check for MongoDB duplicate-key error (E11000)
       if (err.code === 11000 || String(err.message).includes('E11000')) {
+        redis.incr('stats:duplicates_count').catch(() => {});
+
         return res.status(200).json({
           status: 'duplicate',
           eventId: event.eventId,
@@ -129,12 +185,15 @@ eventsRouter.post(
 // Has its own, higher limit counted per request for burst reconnects
 eventsRouter.post(
   '/batch',
+  requireApiKey,
   createRateLimiter({ max: 200, windowSeconds: 5, keyPrefix: 'ratelimit:batch' }),
   checkQueueBackpressure,
   async (req: Request, res: Response) => {
     const batchParse = batchEventsSchema.safeParse(req.body);
 
     if (!batchParse.success) {
+      redis.incr('stats:rejected_count').catch(() => {});
+
       try {
         await RejectedEvent.create({
           rawPayload: req.body,
@@ -154,7 +213,7 @@ eventsRouter.post(
 
     const rawEvents = batchParse.data.events;
     const queue = getTelemetryQueue();
-    const results: Array<Record<string, unknown>> = [];
+    const results: Array<Record<string, unknown>> = new Array(rawEvents.length);
 
     let acceptedCount = 0;
     let duplicateCount = 0;
@@ -162,107 +221,129 @@ eventsRouter.post(
     let maxBatchSeq = 0;
     let hasFreshAccepted = false;
 
-    for (const rawItem of rawEvents) {
-      const parseResult = telemetryEventSchema.safeParse(rawItem);
+    // Process in parallel chunks of 10 for high throughput without exhausting connections
+    const BATCH_CHUNK_SIZE = 10;
+    for (let i = 0; i < rawEvents.length; i += BATCH_CHUNK_SIZE) {
+      const chunk = rawEvents.slice(i, i + BATCH_CHUNK_SIZE);
+      await Promise.all(
+        chunk.map(async (rawItem, chunkIdx) => {
+          const globalIdx = i + chunkIdx;
+          const parseResult = telemetryEventSchema.safeParse(rawItem);
 
-      if (!parseResult.success) {
-        rejectedCount++;
-        const reason = `Validation failed: ${parseResult.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ')}`;
+          if (!parseResult.success) {
+            rejectedCount++;
+            const reason = `Validation failed: ${parseResult.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ')}`;
 
-        try {
-          await RejectedEvent.create({
-            rawPayload: rawItem,
-            deviceId: (rawItem as any)?.deviceId || req.device?.deviceId || null,
-            reason,
-            receivedAt: new Date()
-          });
-        } catch {
-          // ignore persistence failure
-        }
+            try {
+              await RejectedEvent.create({
+                rawPayload: rawItem,
+                deviceId: (rawItem as any)?.deviceId || req.device?.deviceId || null,
+                reason,
+                receivedAt: new Date()
+              });
+            } catch {
+              // ignore persistence failure
+            }
 
-        results.push({
-          status: 'rejected',
-          error: 'Validation failed',
-          details: parseResult.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`)
-        });
-        continue;
-      }
-
-      const event = parseResult.data;
-      const serverReceivedAt = new Date();
-
-      try {
-        // Insert into MongoDB FIRST as source of truth for deduplication
-        const isBatchItemReplay =
-          Boolean(event.replayed) ||
-          (serverReceivedAt.getTime() - new Date(event.timestamp).getTime() > 300000);
-
-        const eventDoc = await Event.create({
-          eventId: event.eventId,
-          deviceId: event.deviceId,
-          seq: event.seq,
-          type: event.type,
-          timestamp: new Date(event.timestamp),
-          receivedAt: serverReceivedAt,
-          payload: event.payload,
-          replayed: Boolean(event.replayed),
-          processingStatus: 'pending'
-        });
-
-        // Fast-path cache in Redis
-        try {
-          await redis.set(`event_seen:${event.eventId}`, '1', 'EX', 86400);
-        } catch {
-          // ignore
-        }
-
-        // Enqueue to BullMQ
-        try {
-          await queue.add('telemetry-event', eventDoc.toObject(), {
-            jobId: event.eventId
-          });
-        } catch {
-          // Leave pending in MongoDB for later sweep
-        }
-
-        if (!isBatchItemReplay && event.seq > maxBatchSeq) {
-          maxBatchSeq = event.seq;
-          hasFreshAccepted = true;
-        }
-
-        acceptedCount++;
-        results.push({
-          status: 'accepted',
-          eventId: event.eventId
-        });
-      } catch (insertErr: any) {
-        if (insertErr.code === 11000 || String(insertErr.message).includes('E11000')) {
-          duplicateCount++;
-          results.push({
-            status: 'duplicate',
-            eventId: event.eventId,
-            message: 'Duplicate event, already received'
-          });
-        } else {
-          rejectedCount++;
-          try {
-            await RejectedEvent.create({
-              rawPayload: rawItem,
-              deviceId: event.deviceId,
-              reason: `Insert error: ${insertErr.message}`,
-              receivedAt: new Date()
-            });
-          } catch {
-            // ignore
+            results[globalIdx] = {
+              status: 'rejected',
+              error: 'Validation failed',
+              details: parseResult.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`)
+            };
+            return;
           }
 
-          results.push({
-            status: 'rejected',
-            eventId: event.eventId,
-            error: 'Database insert failed'
-          });
-        }
-      }
+          const event = parseResult.data;
+          const serverReceivedAt = new Date();
+
+          try {
+            // Insert into MongoDB FIRST as source of truth for deduplication
+            const isBatchItemReplay =
+              Boolean(event.replayed) ||
+              (serverReceivedAt.getTime() - new Date(event.timestamp).getTime() > 300000);
+
+            const eventDoc = await Event.create({
+              eventId: event.eventId,
+              deviceId: event.deviceId,
+              seq: event.seq,
+              type: event.type,
+              timestamp: new Date(event.timestamp),
+              receivedAt: serverReceivedAt,
+              payload: event.payload,
+              replayed: Boolean(event.replayed),
+              processingStatus: 'pending'
+            });
+
+            // Fast-path cache in Redis
+            try {
+              await redis.set(`event_seen:${event.eventId}`, '1', 'EX', 86400);
+            } catch {
+              // ignore
+            }
+
+            // Enqueue to BullMQ
+            try {
+              await queue.add('telemetry-event', eventDoc.toObject(), {
+                jobId: event.eventId
+              });
+            } catch {
+              // Leave pending in MongoDB for later sweep
+            }
+
+            // Publish event_ingested to realtime SSE stream
+            publishRealtimeEvent({
+              event: 'event_ingested',
+              data: eventDoc.toObject()
+            }).catch(() => {});
+
+            if (!isBatchItemReplay && event.seq > maxBatchSeq) {
+              maxBatchSeq = event.seq;
+              hasFreshAccepted = true;
+            }
+
+            acceptedCount++;
+            results[globalIdx] = {
+              status: 'accepted',
+              eventId: event.eventId
+            };
+          } catch (insertErr: any) {
+            if (insertErr.code === 11000 || String(insertErr.message).includes('E11000')) {
+              duplicateCount++;
+              results[globalIdx] = {
+                status: 'duplicate',
+                eventId: event.eventId,
+                message: 'Duplicate event, already received'
+              };
+            } else {
+              rejectedCount++;
+              try {
+                await RejectedEvent.create({
+                  rawPayload: rawItem,
+                  deviceId: event.deviceId,
+                  reason: `Insert error: ${insertErr.message}`,
+                  receivedAt: new Date()
+                });
+              } catch {
+                // ignore
+              }
+
+              results[globalIdx] = {
+                status: 'rejected',
+                eventId: event.eventId,
+                error: 'Database insert failed'
+              };
+            }
+          }
+        })
+      );
+    }
+
+    // Increment Redis counters for stats reporting
+    if (duplicateCount > 0) {
+      redis.incrby('stats:duplicates_count', duplicateCount).catch(() => {});
+    }
+    if (rejectedCount > 0) {
+      redis.incrby('stats:rejected_count', rejectedCount).catch(() => {});
     }
 
     // Update device lastSeenAt and status only if fresh (non-replayed) events were accepted
@@ -297,7 +378,15 @@ eventsRouter.post(
 );
 
 // Query rejected events for verification: GET /v1/events/rejected
-eventsRouter.get('/rejected', async (req: Request, res: Response) => {
+eventsRouter.get('/rejected', async (req: Request, res: Response, next: NextFunction) => {
+  // Allow authentication via x-api-key or dashboard token
+  if (req.headers['x-api-key'] || req.headers['X-API-KEY']) {
+    return requireApiKey(req, res, () => handleGetRejected(req, res));
+  }
+  return dashboardAuth(req, res, () => handleGetRejected(req, res));
+});
+
+async function handleGetRejected(req: Request, res: Response) {
   try {
     const filter: Record<string, unknown> = {};
     if (req.query.deviceId) {
@@ -321,10 +410,10 @@ eventsRouter.get('/rejected', async (req: Request, res: Response) => {
       message: err.message
     });
   }
-});
+}
 
 // GET /v1/events/:id/evaluations - Explainability records for an event
-eventsRouter.get('/:id/evaluations', async (req: Request, res: Response) => {
+eventsRouter.get('/:id/evaluations', dashboardAuth, async (req: Request, res: Response) => {
   try {
     const evaluations = await RuleEvaluation.find({ eventId: req.params.id })
       .sort({ evaluatedAt: 1 })
@@ -342,5 +431,3 @@ eventsRouter.get('/:id/evaluations', async (req: Request, res: Response) => {
     });
   }
 });
-
-

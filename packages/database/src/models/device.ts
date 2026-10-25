@@ -9,6 +9,7 @@ export interface IDevice extends Document {
   apiKeyHash: string;
   status: DeviceStatus;
   createdAt: Date;
+  updatedAt?: Date;
   lastSeenAt?: Date;
   lastSeq?: number;
 }

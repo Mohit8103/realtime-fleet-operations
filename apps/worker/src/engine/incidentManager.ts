@@ -11,7 +11,7 @@ import {
   type IEvent,
   type IRule
 } from '@fleet/database';
-import { config } from '@fleet/config';
+import { config, publishRealtimeEvent } from '@fleet/config';
 import { createLogger } from '@fleet/logger';
 
 const logger = createLogger({ service: 'incident-manager' });
@@ -87,6 +87,7 @@ export async function recordIncidentMatch(params: {
   );
 
   if (existing) {
+    publishRealtimeEvent({ event: 'incident_updated', data: existing.toObject() }).catch(() => {});
     return { incident: existing, isCreated: false };
   }
 
@@ -155,6 +156,7 @@ export async function recordIncidentMatch(params: {
       );
     });
 
+    publishRealtimeEvent({ event: 'incident_created', data: createdIncident!.toObject() }).catch(() => {});
     return { incident: createdIncident!, isCreated: true };
   } catch (err: any) {
     // 3. Handle concurrent race condition (E11000 duplicate key error)
@@ -189,6 +191,7 @@ export async function recordIncidentMatch(params: {
       );
 
       if (raced) {
+        publishRealtimeEvent({ event: 'incident_updated', data: raced.toObject() }).catch(() => {});
         return { incident: raced, isCreated: false };
       }
     }
@@ -233,6 +236,8 @@ export async function autoResolveStaleIncidents(device: IDevice, event: IEvent):
         note: `Stale incident auto-resolved on fresh event ${event.eventId} (seq: ${event.seq})`
       });
       await inc.save();
+
+      publishRealtimeEvent({ event: 'incident_updated', data: inc.toObject() }).catch(() => {});
 
       logger.info(
         { incidentId: inc.incidentId, deviceId: device.deviceId, eventId: event.eventId },

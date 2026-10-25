@@ -21,6 +21,7 @@
     "test:acceptance": "node test-acceptance.mjs",
     "test:phase2": "tsx test-phase2.mjs",
     "test:phase3": "tsx test-phase3.mjs",
+    "test:phase4": "tsx test-phase4.mjs",
     "docker:up": "docker compose up --build",
     "docker:down": "docker compose down -v",
     "docker:logs": "docker compose logs -f"
