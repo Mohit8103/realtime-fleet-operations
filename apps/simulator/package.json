@@ -1,0 +1,23 @@
+{
+  "name": "@fleet/simulator",
+  "version": "1.0.0",
+  "description": "Device fleet telemetry simulator CLI",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "fleet-sim": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@fleet/config": "*",
+    "@fleet/logger": "*",
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

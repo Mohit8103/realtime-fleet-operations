@@ -1,0 +1,29 @@
+{
+  "name": "@fleet/logger",
+  "version": "1.0.0",
+  "description": "Structured Pino JSON logger with correlation ID tracking for Fleet Operations",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc -w"
+  },
+  "dependencies": {
+    "@fleet/config": "*",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "express": "^5.0.1",
+    "typescript": "^5.7.2"
+  }
+}

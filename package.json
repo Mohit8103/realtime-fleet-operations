@@ -1,0 +1,39 @@
+{
+  "name": "fleet-operations-platform",
+  "version": "1.0.0",
+  "description": "Real-Time Operations Platform for Device Fleet Monitoring",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -p \"[{name}]\" -n \"api,worker,web\" -c \"cyan,magenta,green\" \"npm run dev:api\" \"npm run dev:worker\" \"npm run dev:web\"",
+    "dev:api": "npm run dev --workspace=@fleet/api",
+    "dev:worker": "npm run dev --workspace=@fleet/worker",
+    "dev:web": "npm run dev --workspace=@fleet/web",
+    "dev:simulator": "npm run dev --workspace=@fleet/simulator",
+    "simulate": "tsx apps/simulator/src/index.ts",
+    "build": "npm run build --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:acceptance": "node test-acceptance.mjs",
+    "test:phase2": "tsx test-phase2.mjs",
+    "test:phase3": "tsx test-phase3.mjs",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down -v",
+    "docker:logs": "docker compose logs -f"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "concurrently": "^10.0.6",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
+}
