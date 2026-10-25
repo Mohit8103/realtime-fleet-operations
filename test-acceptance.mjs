@@ -110,6 +110,11 @@ show(
   })
 );
 
+// Immediately resume, drain and close testQueue so worker resumes normal processing
+await testQueue.drain();
+await testQueue.resume();
+await testQueue.close();
+
 // 11. Regression: Device deleted from Mongo must return 401 with old key, then 202 after re-registering
 console.log('\n=== 11. Regression: Device deleted from Mongo returns 401, re-register returns 202 ===');
 const regDevice = 'reg-test-dev-' + Date.now();
@@ -165,10 +170,130 @@ show('11e. verify device appears in GET /v1/devices (expect found)', { status: l
 if (!foundInList) throw new Error(`Device ${regDevice} not found in GET /v1/devices after re-registration`);
 console.log('✅ Regression test passed: 401 on deleted device and 202 upon re-registration verified.');
 
+// 12. End-to-End type_match Rule Scenario
+console.log('\n=== 12. End-to-End type_match Rule Evaluation & Incident Deduplication ===');
+const tmRuleName = 'Acceptance Type Match ' + Date.now();
+const ruleRes = await (await fetch(BASE + '/v1/rules', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: tmRuleName,
+    type: 'type_match',
+    severity: 'high',
+    enabled: true,
+    cooldownSeconds: 0,
+    conditions: {
+      eventType: 'error',
+      deviceFilter: { type: 'all' }
+    }
+  })
+})).json();
+show('12a. create type_match rule (expect created)', { status: 201, json: ruleRes });
+if (!ruleRes.rule?._id) throw new Error('Failed to create type_match rule');
+
+// Register device for type_match test
+const tmDevId = 'tm-dev-' + Date.now();
+const tmDev = await call('/v1/devices', { body: { deviceId: tmDevId, name: tmDevId, location: 'lab' } });
+const tmKey = tmDev.json?.apiKey;
+
+// Send 1st matching event of type 'error'
+const tmEv1Id = id();
+const tmEv1Res = await call('/v1/events', {
+  body: {
+    eventId: tmEv1Id,
+    deviceId: tmDevId,
+    seq: 1,
+    type: 'error',
+    timestamp: new Date().toISOString(),
+    payload: { errorCode: 'ERR_HARDWARE_FAULT', detail: 'Voltage spike' }
+  },
+  key: tmKey
+});
+show('12b. send 1st error event (expect 202 accepted)', tmEv1Res);
+if (tmEv1Res.status !== 202) throw new Error(`Expected 202, got ${tmEv1Res.status}`);
+
+async function pollForEvaluation(eventId, ruleName, timeoutMs = 10000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const res = await fetch(BASE + `/v1/events/${eventId}/evaluations`);
+    const json = await res.json().catch(() => ({}));
+    const found = json.evaluations?.find((e) => e.ruleName === ruleName);
+    if (found) return found;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return null;
+}
+
+async function pollForIncident(deviceId, ruleName, expectedOccurrence = 1, timeoutMs = 10000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const res = await fetch(BASE + `/v1/incidents?deviceId=${deviceId}`);
+    const json = await res.json().catch(() => ({}));
+    const matching = json.incidents?.filter((i) => i.ruleName === ruleName);
+    if (matching?.length === 1 && matching[0].occurrenceCount >= expectedOccurrence) {
+      return matching[0];
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return null;
+}
+
+// Poll for rule evaluation record for 1st event
+const tmEval1 = await pollForEvaluation(tmEv1Id, tmRuleName);
+show('12c. rule evaluation record for 1st event (expect matched: true with clear reason)', {
+  evaluation: tmEval1
+});
+if (!tmEval1 || tmEval1.matched !== true || !tmEval1.reason?.includes('event type matched')) {
+  throw new Error(`Expected matched rule evaluation with clear reason, got: ${JSON.stringify(tmEval1)}`);
+}
+
+// Poll for incident created for 1st event
+const tmIncident = await pollForIncident(tmDevId, tmRuleName, 1);
+show('12d. incident created (expect occurrenceCount: 1, state: open)', {
+  incident: tmIncident
+});
+if (!tmIncident || tmIncident.occurrenceCount !== 1 || tmIncident.state !== 'open') {
+  throw new Error(`Expected open incident with occurrenceCount 1, got: ${JSON.stringify(tmIncident)}`);
+}
+
+// Send 2nd matching event of type 'error'
+const tmEv2Id = id();
+const tmEv2Res = await call('/v1/events', {
+  body: {
+    eventId: tmEv2Id,
+    deviceId: tmDevId,
+    seq: 2,
+    type: 'error',
+    timestamp: new Date().toISOString(),
+    payload: { errorCode: 'ERR_HARDWARE_FAULT', detail: 'Voltage spike repeated' }
+  },
+  key: tmKey
+});
+show('12e. send 2nd error event (expect 202 accepted)', tmEv2Res);
+if (tmEv2Res.status !== 202) throw new Error(`Expected 202, got ${tmEv2Res.status}`);
+
+// Poll for incident updated with occurrenceCount: 2 (no duplicate incident created)
+const tmIncident2 = await pollForIncident(tmDevId, tmRuleName, 2);
+const allIncidentsRes = await (await fetch(BASE + `/v1/incidents?deviceId=${tmDevId}`)).json();
+const matchingIncidents = allIncidentsRes.incidents?.filter((i) => i.ruleName === tmRuleName);
+show('12f. incident after 2nd event (expect exactly 1 incident with occurrenceCount: 2)', {
+  matchingIncidentsCount: matchingIncidents?.length,
+  incident: tmIncident2
+});
+if (!matchingIncidents || matchingIncidents.length !== 1 || tmIncident2?.occurrenceCount !== 2) {
+  throw new Error(`Expected exactly 1 incident with occurrenceCount 2, got: ${JSON.stringify(matchingIncidents)}`);
+}
+
+// Verify evaluation record for 2nd event
+const tmEval2 = await pollForEvaluation(tmEv2Id, tmRuleName);
+show('12g. rule evaluation record for 2nd event (expect matched: true)', { evaluation: tmEval2 });
+if (!tmEval2 || tmEval2.matched !== true) {
+  throw new Error(`Expected matched evaluation for 2nd event, got: ${JSON.stringify(tmEval2)}`);
+}
+
+console.log('✅ End-to-end type_match scenario passed: Incident created, reason logged, evaluation stored, occurrenceCount incremented without duplication.');
+
 // Cleanup
-await testQueue.drain();
-await testQueue.resume();
-await testQueue.close();
 const { disconnectMongo } = await import('@fleet/database');
 await disconnectMongo();
 console.log('\n✅ All Phase 1 Acceptance Tests Completed Successfully!\n');

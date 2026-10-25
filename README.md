@@ -103,12 +103,12 @@ curl http://localhost:3000/v1/rules
 # Create a threshold rule
 curl -X POST http://localhost:3000/v1/rules \
   -H "Content-Type: application/json" \
-  -d '{"name":"Very High Heat","type":"threshold","metric":"temperature","operator":">","value":90,"severity":"critical","enabled":true,"cooldownSeconds":0}'
+  -d '{"name":"Very High Heat","type":"threshold","severity":"critical","enabled":true,"cooldownSeconds":0,"conditions":{"metric":"temperature","operator":">","value":90,"deviceFilter":{"type":"all"}}}'
 
 # Create a rule that fires when a device reports a given event type
 curl -X POST http://localhost:3000/v1/rules \
   -H "Content-Type: application/json" \
-  -d '{"name":"Device Error Reported","type":"type_match","eventType":"error","severity":"high","enabled":true,"cooldownSeconds":0}'
+  -d '{"name":"Device Error Reported","type":"type_match","severity":"high","enabled":true,"cooldownSeconds":0,"conditions":{"eventType":"error","deviceFilter":{"type":"all"}}}'
 ```
 
 Rule names are unique; creating a duplicate returns `409 Conflict`. To see why a rule did or did not fire for an event, call `GET /v1/events/<eventId>/evaluations`.
