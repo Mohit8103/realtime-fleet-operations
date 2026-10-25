@@ -71,7 +71,17 @@ async function cleanup() {
       'fleet:stats:duplicates',
       'fleet:stats:rejected'
     );
-    console.log('✅ Cleared Redis stream and activity feed');
+    for (const pattern of ['device_key:*', 'event_seen:*', 'ratelimit:*']) {
+      let cursor = '0';
+      do {
+        const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        cursor = nextCursor;
+        if (keys.length > 0) {
+          await redis.del(...keys);
+        }
+      } while (cursor !== '0');
+    }
+    console.log('✅ Cleared Redis stream, activity feed, and cached device_key:* entries');
     redis.disconnect();
   } catch (err: any) {
     console.warn('⚠️ Warning clearing Redis:', err.message);

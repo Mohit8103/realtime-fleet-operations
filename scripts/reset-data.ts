@@ -88,6 +88,21 @@ async function resetData() {
     );
     console.log('✅ Cleared Redis stream, activity feed, and counters');
 
+    // Delete all device_key:* cached entries in Redis
+    let deviceKeyCount = 0;
+    for (const pattern of ['device_key:*', 'event_seen:*', 'ratelimit:*']) {
+      let cursor = '0';
+      do {
+        const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        cursor = nextCursor;
+        if (keys.length > 0) {
+          await redis.del(...keys);
+          if (pattern === 'device_key:*') deviceKeyCount += keys.length;
+        }
+      } while (cursor !== '0');
+    }
+    console.log(`✅ Cleared all Redis device_key:* (${deviceKeyCount} deleted), event_seen:*, and ratelimit:* entries`);
+
     // Obliterate BullMQ telemetry queue
     const queue = new Queue('telemetry-queue', { connection: redis });
     try {

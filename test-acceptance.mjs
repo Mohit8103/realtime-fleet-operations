@@ -110,9 +110,66 @@ show(
   })
 );
 
+// 11. Regression: Device deleted from Mongo must return 401 with old key, then 202 after re-registering
+console.log('\n=== 11. Regression: Device deleted from Mongo returns 401, re-register returns 202 ===');
+const regDevice = 'reg-test-dev-' + Date.now();
+const reg1 = await call('/v1/devices', { body: { deviceId: regDevice, name: regDevice, location: 'lab' } });
+const regKey = reg1.json?.apiKey;
+
+// Verify device exists and sends initial event (expect 202)
+const regEv1 = {
+  eventId: id(), deviceId: regDevice, seq: 1, type: 'reading',
+  timestamp: new Date().toISOString(),
+  payload: { metric: 'temperature', value: 25 }
+};
+const resBefore = await call('/v1/events', { body: regEv1, key: regKey });
+show('11a. initial event before deletion (expect 202)', resBefore);
+if (resBefore.status !== 202) throw new Error(`Expected 202 on initial event, got ${resBefore.status}`);
+
+// Delete device directly from MongoDB (simulating reset-data or out-of-band deletion)
+const { connectMongo, Device } = await import('@fleet/database');
+await connectMongo();
+await Device.deleteOne({ deviceId: regDevice });
+
+// Attempt to send event with old key - must return 401 (even if key was cached in Redis)
+const regEv2 = {
+  eventId: id(), deviceId: regDevice, seq: 2, type: 'reading',
+  timestamp: new Date().toISOString(),
+  payload: { metric: 'temperature', value: 26 }
+};
+const resAfterDel = await call('/v1/events', { body: regEv2, key: regKey });
+show('11b. event with old key after Mongo device deleted (expect 401)', resAfterDel);
+if (resAfterDel.status !== 401) throw new Error(`Expected 401 on deleted device, got ${resAfterDel.status}`);
+
+// Re-register device via POST /v1/devices
+const reg2 = await call('/v1/devices', { body: { deviceId: regDevice, name: regDevice, location: 'lab' } });
+const newKey = reg2.json?.apiKey;
+show('11c. re-register device (expect 200 or 201)', reg2);
+if (!newKey) throw new Error('Failed to get new API key on re-registration');
+
+// Send event with new key - expect 202
+const regEv3 = {
+  eventId: id(), deviceId: regDevice, seq: 3, type: 'reading',
+  timestamp: new Date().toISOString(),
+  payload: { metric: 'temperature', value: 27 }
+};
+const resReReg = await call('/v1/events', { body: regEv3, key: newKey });
+show('11d. event with new key after re-registration (expect 202)', resReReg);
+if (resReReg.status !== 202) throw new Error(`Expected 202 after re-registration, got ${resReReg.status}`);
+
+// Verify device appears in GET /v1/devices
+const listRes = await fetch(BASE + `/v1/devices?search=${regDevice}`);
+const listJson = await listRes.json();
+const foundInList = listJson.devices?.some((d) => d.deviceId === regDevice);
+show('11e. verify device appears in GET /v1/devices (expect found)', { status: listRes.status, found: foundInList });
+if (!foundInList) throw new Error(`Device ${regDevice} not found in GET /v1/devices after re-registration`);
+console.log('✅ Regression test passed: 401 on deleted device and 202 upon re-registration verified.');
+
 // Cleanup
 await testQueue.drain();
 await testQueue.resume();
 await testQueue.close();
-await redis.quit();
+const { disconnectMongo } = await import('@fleet/database');
+await disconnectMongo();
 console.log('\n✅ All Phase 1 Acceptance Tests Completed Successfully!\n');
+process.exit(0);

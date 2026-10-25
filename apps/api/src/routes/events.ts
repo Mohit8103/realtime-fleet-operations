@@ -125,26 +125,36 @@ eventsRouter.post(
         // Cache failure non-fatal
       }
 
-      // 3. Update device lastSeenAt and status on accepted event (non-replayed only)
+      // 3. Update device lastSeenAt and status (treated as required: device must exist)
       const isReplay =
         Boolean(event.replayed) ||
         (serverReceivedAt.getTime() - new Date(event.timestamp).getTime() > 300000);
 
-      if (!isReplay) {
-        try {
-          await Device.updateOne(
-            { deviceId: event.deviceId },
-            {
-              $set: {
-                lastSeenAt: serverReceivedAt,
-                status: 'online'
-              },
-              $max: { lastSeq: event.seq }
-            }
-          );
-        } catch (err: any) {
-          req.log?.warn({ err: err.message }, 'Failed to update device lastSeenAt');
+      const updateOp = isReplay
+        ? { $max: { lastSeq: event.seq } }
+        : {
+            $set: {
+              lastSeenAt: serverReceivedAt,
+              status: 'online'
+            },
+            $max: { lastSeq: event.seq }
+          };
+
+      const updateRes = await Device.updateOne({ deviceId: event.deviceId }, updateOp);
+
+      if (updateRes.matchedCount === 0) {
+        req.log?.error(
+          { deviceId: event.deviceId, eventId: event.eventId },
+          'Ingestion failed: Device not found in MongoDB for lastSeenAt/lastSeq update'
+        );
+        if (req.device?.apiKeyHash) {
+          await redis.del(`device_key:${req.device.apiKeyHash}`).catch(() => {});
         }
+        await Event.deleteOne({ eventId: event.eventId }).catch(() => {});
+        return res.status(401).json({
+          error: 'Unauthorized: Device not found in database, please re-register',
+          deviceId: event.deviceId
+        });
       }
 
       // 4. Publish event_ingested to realtime SSE stream
@@ -228,6 +238,21 @@ eventsRouter.post(
         error: 'Invalid batch format',
         details: batchParse.error.errors
       });
+    }
+
+    const deviceId = req.device?.deviceId;
+    if (deviceId) {
+      const devExists = await Device.exists({ deviceId });
+      if (!devExists) {
+        req.log?.error({ deviceId }, 'Batch ingestion failed: Device not found in MongoDB');
+        if (req.device?.apiKeyHash) {
+          await redis.del(`device_key:${req.device.apiKeyHash}`).catch(() => {});
+        }
+        return res.status(401).json({
+          error: 'Unauthorized: Device not found in database, please re-register',
+          deviceId
+        });
+      }
     }
 
     const rawEvents = batchParse.data.events;
@@ -391,7 +416,7 @@ eventsRouter.post(
     // Update device lastSeenAt and status only if fresh (non-replayed) events were accepted
     if (hasFreshAccepted && req.device?.deviceId) {
       try {
-        await Device.updateOne(
+        const updateRes = await Device.updateOne(
           { deviceId: req.device.deviceId },
           {
             $set: {
@@ -401,8 +426,17 @@ eventsRouter.post(
             $max: { lastSeq: maxBatchSeq }
           }
         );
-      } catch {
-        // non-fatal
+        if (updateRes.matchedCount === 0) {
+          req.log?.error(
+            { deviceId: req.device.deviceId },
+            'Batch ingestion update failed: Device not found in MongoDB'
+          );
+          if (req.device?.apiKeyHash) {
+            await redis.del(`device_key:${req.device.apiKeyHash}`).catch(() => {});
+          }
+        }
+      } catch (err: any) {
+        req.log?.warn({ err: err.message }, 'Failed to update device status in batch');
       }
     }
 

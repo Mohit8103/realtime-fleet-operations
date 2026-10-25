@@ -91,6 +91,12 @@ function appendToBuffer(event: SimulatorEvent): void {
   saveBuffer(buffer);
 }
 
+function removeDeviceKey(deviceId: string, keys: KeysMap): void {
+  delete keys[deviceId];
+  saveKeys(keys);
+  console.log(`[Simulator] Removed stale key for ${deviceId} from .simulator-keys.json`);
+}
+
 // Ensure device is registered and key is valid
 async function ensureDevice(
   deviceId: string,
@@ -98,7 +104,9 @@ async function ensureDevice(
   keys: KeysMap,
   forceRegister = false
 ): Promise<string> {
-  if (!forceRegister && keys[deviceId]?.apiKey) {
+  if (forceRegister) {
+    removeDeviceKey(deviceId, keys);
+  } else if (keys[deviceId]?.apiKey) {
     return keys[deviceId].apiKey;
   }
 
@@ -125,6 +133,7 @@ async function ensureDevice(
     seq: keys[deviceId]?.seq || 0
   };
   saveKeys(keys);
+  console.log(`[Simulator] Successfully registered ${deviceId} in database and saved key`);
   return apiKey;
 }
 
@@ -179,9 +188,11 @@ async function sendEventWithRetry(
         return { status: 'rejected' };
       }
 
-      // 401 Unauthorized -> Re-register device key and retry
+      // 401 Unauthorized -> Delete key from .simulator-keys.json, re-register and retry
       if (res.status === 401) {
         stats.retries++;
+        console.warn(`[Simulator] 401 Unauthorized for ${deviceId}. Removing key and re-registering...`);
+        removeDeviceKey(deviceId, keys);
         await ensureDevice(deviceId, apiBase, keys, true);
         continue;
       }
@@ -215,7 +226,8 @@ async function sendEventWithRetry(
 // Replay buffer in batches of 50 via /v1/events/batch
 async function replayBatch(
   batch: SimulatorEvent[],
-  apiKey: string,
+  deviceId: string,
+  keys: KeysMap,
   apiBase: string,
   maxAttempts = 5
 ): Promise<boolean> {
@@ -224,12 +236,17 @@ async function replayBatch(
   };
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    let apiKey = keys[deviceId]?.apiKey;
+    if (!apiKey) {
+      apiKey = await ensureDevice(deviceId, apiBase, keys, true);
+    }
+
     try {
       const res = await fetch(`${apiBase}/v1/events/batch`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-api-key': apiKey
+          'x-api-key': keys[deviceId]?.apiKey || apiKey
         },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(10000)
@@ -243,6 +260,15 @@ async function replayBatch(
         stats.duplicate += summary.duplicate || 0;
         stats.rejected += summary.rejected || 0;
         return true;
+      }
+
+      // 401 Unauthorized -> Delete key from .simulator-keys.json and re-register
+      if (res.status === 401) {
+        stats.retries++;
+        console.warn(`[Simulator] Replay batch 401 Unauthorized for ${deviceId}. Removing key and re-registering...`);
+        removeDeviceKey(deviceId, keys);
+        await ensureDevice(deviceId, apiBase, keys, true);
+        continue;
       }
 
       if (res.status === 429 || res.status >= 500) {
@@ -276,9 +302,8 @@ async function drainBuffer(keys: KeysMap, apiBase: string, defaultApiKey: string
   while (buffer.length > 0) {
     const chunk = buffer.slice(0, 50);
     const primaryDeviceId = chunk[0].deviceId;
-    const apiKey = keys[primaryDeviceId]?.apiKey || defaultApiKey;
 
-    const ok = await replayBatch(chunk, apiKey, apiBase);
+    const ok = await replayBatch(chunk, primaryDeviceId, keys, apiBase);
     if (!ok) {
       // Replay failed; preserve buffer and back off
       break;

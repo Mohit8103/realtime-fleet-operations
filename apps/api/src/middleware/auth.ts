@@ -44,7 +44,20 @@ export async function requireApiKey(req: Request, res: Response, next: NextFunct
     // Check Redis cache using SHA-256 hash (do NOT use plaintext key in Redis key names)
     let deviceId = await redis.get(`device_key:${apiKeyHash}`);
 
-    if (!deviceId) {
+    if (deviceId) {
+      // Must verify device document still exists in MongoDB
+      const exists = await Device.exists({ deviceId, apiKeyHash });
+      if (!exists) {
+        req.log?.warn(
+          { deviceId, apiKeyHash },
+          'Cached device key points to missing Mongo device document; invalidating cache'
+        );
+        await redis.del(`device_key:${apiKeyHash}`);
+        return res.status(401).json({
+          error: 'Unauthorized: Device not found in database, please re-register'
+        });
+      }
+    } else {
       // Fallback to MongoDB lookup by hash
       const device = await Device.findOne({ apiKeyHash }).lean();
       if (!device) {
