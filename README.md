@@ -32,8 +32,9 @@ Built with a focus on **operational reliability, predictable latency, fault-tole
 git clone https://github.com/Mohit8103/assesment.git
 cd assesment
 
-# Install workspace dependencies
+# Install workspace dependencies & build packages
 npm install
+npm run build
 ```
 
 ### 2. Configure Environment Variables

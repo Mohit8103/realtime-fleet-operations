@@ -20,6 +20,7 @@
     "demo:burst": "tsx apps/simulator/src/index.ts --devices 1 --rate 1 --burst 300",
     "demo:chaos": "tsx apps/simulator/src/index.ts --devices 5 --rate 1 --duplicate-rate 0.05 --out-of-order-rate 0.05 --malformed-rate 0.02 --anomaly-rate 0.1 --offline-after 20 --offline-for 30",
     "build": "npm run build --workspaces --if-present",
+    "prepare": "npm run build",
     "seed": "tsx scripts/seed.ts",
     "test": "tsx scripts/run-all-tests.ts",
     "test:unit": "vitest run",
