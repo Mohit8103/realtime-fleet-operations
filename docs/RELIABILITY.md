@@ -1,38 +1,63 @@
-# Reliability & Fault-Tolerance Architecture
+# Reliability and Failure Handling
 
-## 1. Core Reliability Principles & Delivery Guarantees
+This document describes what the platform does when things go wrong, where each behavior is implemented, and how it was checked. It also says what is not guaranteed. Where a behavior is verified only by simulation or by hand, that is stated.
 
-The Fleet Operations Platform guarantees **predictable resilience, data preservation, and operational continuity** under hardware crashes, network partitions, and downstream outages.
+## 1. Guarantees
 
-### 1.1 Delivery Guarantee: At-Least-Once Delivery + Idempotent Processing
-- **Edge-to-Server**: Devices buffer telemetry locally and retry upon failure until the server explicitly acknowledges acceptance (`status: "accepted"` or `"duplicate"`). This guarantees **at-least-once delivery**.
-- **Idempotency Gate**: The server guarantees that duplicated network transmissions produce **zero duplicate side effects**. The first write establishes durable state in MongoDB; subsequent duplicate submissions return HTTP 200 `status: "duplicate"` without re-triggering queues, rule evaluations, or notifications.
-- **Server-to-Outbox**: The Transactional Outbox pattern guarantees **at-least-once notification dispatch** to operator webhooks. Webhooks receive an `Idempotency-Key: <notificationId>` header to deduplicate deliveries on the receiver side.
+### 1.1 Delivery: at-least-once plus idempotent processing
 
-### 1.2 Ordering Approach: Device-Side Monotonic Sequence & Timestamps
-- In distributed IoT systems, packet arrival order at the server is non-deterministic due to network jitter, packet retransmissions, and multi-threaded API workers.
-- **Ordering Source**: The platform relies on the edge device's internal monotonic sequence counter (`seq`) and UTC generation timestamp (`timestamp`), **never** arrival order (`receivedAt`).
-- **Device State Updates**: The worker updates device records using atomic `$max: { lastSeq }` operations and compares `eventTimestamp >= currentLastSeen` before advancing liveness, ensuring late-arriving packets do not overwrite newer state.
+- **Device to platform: at-least-once.** A device keeps an event buffered until the API explicitly acknowledges it (`accepted` or `duplicate`). Anything not acknowledged is sent again, so an event can arrive more than once but is not silently lost.
+- **Idempotent ingestion.** Every event carries a device-generated `eventId`. The API inserts the event into MongoDB first, and a unique index on `eventId` rejects a second insert. A duplicate returns HTTP 200 with `status: "duplicate"` and causes no new job, rule evaluation, incident or notification. MongoDB is the source of truth; a Redis cache is only a fast path and is written after a successful insert.
+- **Platform to operators: at-least-once.** Notifications go through an outbox and are retried until they succeed or are marked `dead`. Each delivery carries an `Idempotency-Key` header (the notification id) so a receiver can discard repeats.
+- **Net effect:** duplicates and retries are absorbed, so the visible results (events stored, incidents opened, notifications recorded) are the same as exactly-once. The platform does not claim exactly-once delivery on the wire.
+
+### 1.2 Ordering
+
+- Each event is stored with the device's `timestamp` and monotonic `seq`, and with the server's `receivedAt`. Arrival order is never used to decide what the latest reading is.
+- **Out-of-order and late events are accepted**, not rejected, and are evaluated by threshold and type rules.
+- **`lastSeenAt` is the server receive time of the latest live (non-replayed) event.** Events marked `replayed: true`, or with a timestamp older than five minutes, are evaluated by the rules (the resulting incident is flagged `fromReplay`) but never advance `lastSeenAt` and never resolve a stale incident.
+- **Processing order is not strict.** Jobs for one device can be processed concurrently by more than one worker, so rule evaluation for a single device is not guaranteed to follow `seq` order. The incident logic is written so that this does not produce duplicate incidents.
 
 ---
 
-## 2. Failure Scenarios & Recovery Matrix
+## 2. Failure scenarios
 
-| Failure Scenario | System Behavior & Mitigation | Where Implemented | How Tested |
+| Failure | What the system does | Where implemented | How verified |
 | :--- | :--- | :--- | :--- |
-| **1. Duplicate Delivery**<br/>*(Cellular retry, client re-send, or network replay)* | The API attempts insertion into the MongoDB `events` collection. The unique index on `eventId` immediately rejects the second write with error `E11000`. The API catches this and returns HTTP 200 with `status: "duplicate"`. No duplicate job is enqueued; no duplicate incident is created. | `apps/api/src/routes/events.ts` (lines 95–173)<br/>`packages/database/src/models/event.ts` | **`test-acceptance.mjs`** (Test 3 & Test 8b). Verified both with Redis cache active and after Redis key eviction (`DEL`). |
-| **2. Accepted But Processing Fails**<br/>*(Worker throws unhandled error, database times out during rule evaluation)* | The event is already durably persisted in MongoDB with `processingStatus: "pending"`. BullMQ automatically retries the job up to 3 times with exponential backoff. If all attempts are exhausted, the worker sets `processingStatus: "failed"`, logs the error stack, and an admin can inspect via `/v1/admin/failed-events` and re-enqueue via `POST /v1/admin/failed-events/:id/retry`. The background sweeper also re-enqueues orphaned pending events. | `apps/worker/src/consumer/telemetryConsumer.ts`<br/>`apps/worker/src/engine/sweeper.ts`<br/>`apps/api/src/routes/admin.ts` | **`test-phase2.mjs`** (Test 6: Sweeper re-enqueues orphaned pending events; Test 8: Admin failed events inspection). |
-| **3. Worker or API Restart**<br/>*(Pod eviction, OOM kill, unhandled crash, deployment rollout)* | - **API Restart**: Ingested events are already written to MongoDB and BullMQ before HTTP 202 is returned. Reconnecting devices retry unacknowledged packets.<br/>- **Worker Crash**: If a worker dies while holding a notification lease, its `lockedUntil` timestamp expires. The next available worker or recurring tick claims the expired lease (`lockedUntil < now`) and finishes delivery. Active queue jobs in BullMQ return to the queue via stalled-job detection (`stalledInterval: 30000`). | `apps/worker/src/notifications/notificationDispatcher.ts` (`claimNextNotification`)<br/>`apps/worker/src/consumer/telemetryConsumer.ts` | **`test-phase3.mjs`** (Test 8b: Expired lease reclaimed after crash; Test 10: Outbox repair sweeper heals orphaned records). |
-| **4. Notification Service Down**<br/>*(Downstream webhook endpoint returns 500, 502, 504, or times out)* | The incident is created safely in MongoDB. The notification attempt fails, increments `notification.attempts`, and schedules the next attempt using exponential backoff with jitter (`1000 * 2^attempts + jitter`, capped at 60s). When the webhook recovers, pending notifications are delivered. If `MAX_NOTIFY_ATTEMPTS` (5) is reached, it transitions to `status: "dead"` without crashing workers. | `apps/worker/src/notifications/notificationDispatcher.ts` (`processNotification`) | **`test-phase3.mjs`** (Test 7: Mock webhook forced to 500 then restored; Test 9: Dead-letter transition after 5 attempts). |
-| **5. Device Reconnecting After Minutes Offline**<br/>*(Tunnel, power outage, cell blind spot)* | Device buffers readings in memory and persists to `.simulator-buffer.json`. Meanwhile, the server flags the device as `stale` and creates a `Manual Stale` incident. Upon reconnect, the device sends buffered data in batches of 50 via `/v1/events/batch` with `replayed: true`. The server evaluates rules on historical data but **does not** advance `lastSeenAt`. Once the buffer is cleared and fresh events arrive, the device becomes `online` and stale incidents auto-resolve. | `apps/worker/src/consumer/telemetryConsumer.ts`<br/>`apps/worker/src/engine/incidentManager.ts`<br/>`apps/simulator/src/index.ts` | **`npm run demo:offline`**<br/>**`test-phase2.mjs`** (Test 7)<br/>**`test-phase3.mjs`** (Test 6: Replay vs Fresh auto-resolve). |
-| **6. Ingestion Exceeding Processing Capacity**<br/>*(Traffic spike, reconnect storms, DDOS flood)* | Two-tier backpressure protection:<br/>1. **Queue Depth Backpressure**: When BullMQ waiting jobs exceed `MAX_QUEUE_DEPTH` (5000), the API rejects new requests with HTTP `429 Too Many Requests`, response code `"queue_full"`, and a `Retry-After: 2` header.<br/>2. **Per-Device Rate Limiting**: Devices exceeding 100 requests / 5 seconds receive HTTP 429 `"rate_limited"`.<br/>3. **Batch Rate Limiter**: `/v1/events/batch` has an independent, higher rate limit to absorb burst reconnects without dropping packets. | `apps/api/src/middleware/queueBackpressure.ts`<br/>`apps/api/src/middleware/rateLimit.ts` | **`test-acceptance.mjs`** (Test 7: 300 flood requests; Test 10: Queue depth >= 5 returns 429 `queue_full`). |
+| **Duplicate delivery** (retry, resend, replay) | The insert into `events` hits the unique index on `eventId`; the API catches the duplicate-key error and returns `duplicate`. No job is enqueued and nothing downstream runs again. | `apps/api/src/routes/events.ts`, `packages/database/src/models/event.ts` | Automated: acceptance suite sends the same event twice, and again after deleting the Redis cache key, to show MongoDB decides. |
+| **Event accepted but processing fails** | The event is already stored with `processingStatus: "pending"` before the API replies. The job is retried with exponential backoff. After the final attempt the event is marked `failed` with the error, listed at `GET /v1/admin/failed-events`, and can be re-queued with `POST /v1/admin/failed-events/:id/retry`. A recovery sweep also re-enqueues events left `pending`, or stuck in `processing`, so a crash between storing and enqueuing does not lose work. If the enqueue itself fails, the API returns 503 and the event stays `pending` for the sweep. | `apps/worker/src/consumer/telemetryConsumer.ts`, recovery sweeper in `apps/worker/src/engine/`, `apps/api/src/routes/admin.ts` | Automated: Phase 2 suite (sweeper re-enqueues a pending event; failed events are listed). |
+| **Worker or API restart** | **API:** an event is acknowledged only after it is stored in MongoDB and queued, so a restart cannot lose an acknowledged event; devices resend anything unacknowledged. SSE clients reconnect with `Last-Event-ID` and receive what they missed. **Worker:** BullMQ returns stalled jobs to the queue, the startup and periodic sweeps re-enqueue stored but unprocessed events, and processing is idempotent, so a repeated job creates no duplicate incident. A notification claimed by a worker that dies is reclaimed once its lease expires. | `telemetryConsumer.ts`, `notificationDispatcher.ts` (claim with lease), the SSE route in `apps/api` | Automated, simulated: the suite leaves an expired notification lease and an incident with no notification, then checks recovery. Manual, real: worker stopped, 20 events sent, worker restarted; all 20 processed, no duplicate evaluations. Manual: API restarted with the dashboard open, which reconnected. A killed (`kill -9`) process is not tested. |
+| **Notification service unavailable** | Incident creation does not depend on notifications. The notification stays in the outbox and is retried with exponential backoff and jitter. After the maximum number of attempts (`MAX_NOTIFY_ATTEMPTS`) it becomes `dead` and stays visible at `GET /v1/notifications`. Two workers cannot send the same notification: delivery is claimed atomically with a lease. | `apps/worker/src/notifications/notificationDispatcher.ts` | Automated: Phase 3 suite switches the mock webhook to failing, checks the incident exists and the notification is retried, restores the webhook and checks for `sent`; another step runs a notification to the `dead` state. |
+| **Device reconnects after minutes offline** | While silent, the device is detected as stale and one `Stale Device Alert` incident opens per device. On reconnect the device sends its buffer in order, in batches, with `replayed: true`. The platform stores and evaluates those events, keeps their original timestamps, and does not treat the device as healthy. The first fresh (non-replayed) event updates `lastSeenAt` and auto-resolves the stale incident with a timeline entry. | `apps/worker/src/consumer/telemetryConsumer.ts`, `apps/worker/src/engine/incidentManager.ts`, `apps/simulator/` | Automated: Phase 2 and 3 suites (replayed event does not resolve a stale incident; fresh event does). Manual: `npm run demo:offline`. |
+| **Ingestion exceeds processing capacity** | Two protections. **Queue backpressure:** when the BullMQ backlog reaches `MAX_QUEUE_DEPTH` (default 5000) the API returns `429` with `code: "queue_full"` and a `Retry-After` header. **Per-device rate limiting:** a device that exceeds its request budget gets `429` with `code: "rate_limited"`; the batch endpoint has its own, larger budget so a reconnect burst is not throttled like normal traffic. Devices back off and retry, and buffered events are kept. Ingestion is separated from processing by the queue, so a spike fills the queue and does not slow the API. | `apps/api/src/middleware/queueBackpressure.ts`, `apps/api/src/middleware/rateLimit.ts` | Automated: acceptance suite floods 300 requests (only `202` and `429`, no 5xx) and checks the `queue_full` response with a lowered limit. Sustained load was not tested. |
+| **MongoDB or Redis unavailable** | **At startup:** the API and the worker check both databases and exit with an error naming the failing service. **While running:** `GET /readyz` returns 503 naming the failing dependency, while `/healthz` stays a cheap liveness check. An event is acknowledged only after it is stored in MongoDB, so a request that fails because of an outage is not acknowledged and the device keeps it buffered. Behavior of individual features during a partial outage (for example the rate limiter or the realtime stream when Redis is down mid-run) has not been verified. | Startup check in `packages/config`, readiness endpoints in `apps/api` and `apps/worker` | Startup failure checked by hand with a wrong Redis password (exits within a second with a clear message). Readiness endpoints covered by unit tests. A database outage during a run is not covered by an automated test. |
+
+### Duplicate incidents under concurrency
+
+Incidents are deduplicated by `dedupeKey` (rule plus device). A partial unique index allows at most one incident per key while it is `open` or `acknowledged`, and creation uses an atomic upsert; a lost race retries as an update. Repeated matches increment `occurrenceCount`, and repeated stale checks increment `suppressedStaleChecksCount`. Verified by an automated test with 20 concurrent matches in one process, and by running two workers by hand. Concurrency across separate processes is covered by the index, but the automated test does not itself run several processes.
+
+### Outbox atomicity
+
+When an incident is created, the incident and its notification record are written in a single MongoDB transaction, and a unique index on `notifications.incidentId` prevents a second creation notification. As a safety net, a repair sweep (at startup and every minute) creates a missing notification for any open incident older than a short grace period. Verified automatically by simulating a crash between the two writes.
 
 ---
 
-## 3. Storage Hygiene & Memory Management
+## 3. Storage and memory limits
 
-To prevent unbounded resource consumption on cloud and free tiers:
-1. **Rule Evaluation TTL**: Every evaluation recorded in `rule_evaluations` carries an automatic 24-hour expiration managed by MongoDB's native TTL index (`{ expireAfterSeconds: 86400 }`).
-2. **Redis BullMQ Job Capping**: Completed jobs are limited to 100 and failed jobs to 500 (`removeOnComplete: 100`, `removeOnFail: 500`).
-3. **Redis Stream Capping**: Realtime SSE messages in Redis streams are capped using approximate length trimming (`XADD MAXLEN ~ 500`), ensuring Redis memory usage remains bounded under 30 MB even during million-event simulations.
-4. **Stale Evaluation Tick Suppression**: The stale detector runs every 5 seconds. To avoid writing millions of redundant evaluations, it records an evaluation once upon incident creation and then increments `occurrenceCount` and suppresses repeated evaluations until status changes.
+The databases used for development are free tiers, so growth is bounded:
+
+- `rule_evaluations` has a 24-hour TTL index.
+- Completed BullMQ jobs are limited to the last 100 and failed jobs to the last 500.
+- The realtime stream in Redis is trimmed to roughly 500 messages (`XADD MAXLEN ~`).
+- Stale-device checks that find an incident already open do not write a new evaluation record; they increment a counter on the incident.
+
+After the development and test runs, Redis used under 5 MB of its 30 MB limit. This has not been tested at larger volumes.
+
+---
+
+## 4. Not guaranteed
+
+- Exactly-once delivery on the wire.
+- Strict per-device processing order.
+- Behavior across a MongoDB or Redis failover: both are single nodes.
+- Protection from unauthenticated traffic. The rate limits apply per registered device, device registration is open, and the dashboard endpoints have no operator login. See [LIMITATIONS.md](LIMITATIONS.md).
